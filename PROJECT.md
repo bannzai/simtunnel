@@ -271,15 +271,18 @@ env = { SIMTUNNEL_WDA_URL = "http://simtunnel-<session>:8100" }
 - 座標系: screenshot はピクセル、tap / swipe はポイント。`screen_info` が返す scale（例: 3）で ピクセル ÷ scale = ポイント に変換する
 
 ### Phase 4: 拡張
+- [x] WDA のビルド高速化（完了: 2026-07-05）: WDA を `WDA_REF`（v15.1.3）に固定し、`build-for-testing` の成果物（4.8MB）を actions/cache に保存。ヒット時は clone / ビルドをスキップして `test-without-building` で起動
+  - 実測: dispatch → 操作可能まで、キャッシュミス約 4.8 分 / **ヒット約 2.8 分**（改善前は約 10 分）
+  - ジョブは `down` で cancel されるため、post step ではなくビルド直後に明示保存する
 - [ ] simtunnel-agentd: runner 上の HTTP 受け口（tailnet 内限定）で simctl を遠隔実行
       （ローカルでビルドした .app を zip で転送 → install → launch のループを可能にする）
 - [ ] 1 runner 複数 Simulator（WDA を 8100+i / 9100+i で複数起動。Runner のメモリ制約を要検証）
-- [ ] WDA のビルド高速化（prebuilt WDA の利用 or キャッシュ。要検証）
 
 ## 未検証事項・リスク
 
 - ~~WDA の bind interface~~: **解決済み（Phase 1 実測）**。Simulator 上の WDA は 8100/9100 を全インターフェースで listen し、bridge は不要だった。挙動が変わった時の保険として bridge.sh は残す（到達可能なら何もしない）
 - **転送帯域**: GHA runner ↔ ローカル間は direct 接続が確立せず DERP relay 経由（Phase 1 実測）。制御系 API（tap / 入力 / status）は 0.5〜2 秒で実用範囲だが、大きなレスポンスの転送は遅い。スクリーンショットは MJPEG フレーム抽出で回避。`.app` 転送（Phase 4）はこの帯域がボトルネックになる可能性が高い
-- **WDA 起動時間**: 実測 7.5 分（ビルド込み）。prebuilt / キャッシュでの短縮は Phase 4
+- ~~WDA 起動時間~~: **解決済み（Phase 4）**。ビルドキャッシュ導入で dispatch → 操作可能は約 2.8 分（キャッシュヒット時）
+- **`down` 直後の同名セッション再起動**: ephemeral node が tailnet から消えるまで数十秒かかり、その間の `up <同名>` は冪等チェックに当たって何もしない。`simtunnel list` でノード消滅を確認してから `up` する
 - **同時実行上限**: Free プランは macOS 5 並列。worktree を跨いだ総セッション数の上限になる
 - **Runner スペック**: GitHub-hosted macOS (arm64) はメモリが小さめ。1 runner 複数 Simulator の成立性は要検証
