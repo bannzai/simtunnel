@@ -1,6 +1,6 @@
 #!/bin/bash
-# WDA (127.0.0.1:8100) と MJPEG (127.0.0.1:9100) を tailscale インターフェースへ中継する。
-# WDA がすでに tailscale インターフェースで listen していれば何もしない（冪等）。
+# 引数で渡されたポート（省略時は 8100 9100）の 127.0.0.1 を tailscale インターフェースへ中継する。
+# すでに tailscale インターフェースで listen しているポートは何もしない（冪等）。
 set -euo pipefail
 
 TS_IP="$(tailscale ip -4 | head -1)"
@@ -25,5 +25,8 @@ ensure_bridge() {
   echo "port ${port}: bridged ${TS_IP}:${port} -> 127.0.0.1:${port}"
 }
 
-ensure_bridge 8100
-ensure_bridge 9100
+PORTS=("$@")
+[ ${#PORTS[@]} -gt 0 ] || PORTS=(8100 9100)
+for port in "${PORTS[@]}"; do
+  ensure_bridge "$port"
+done
