@@ -1,0 +1,91 @@
+# iOS Simulator セッションを張る workflow。
+# 起動例:
+#   gh workflow run simulator-session.yml -f session=dev -f duration_minutes=60
+# 停止:
+#   gh run cancel <run-id> -R bannzai/simtunnel
+name: simulator-session
+
+on:
+  workflow_dispatch:
+    inputs:
+      session:
+        description: "セッション名。tailnet ホスト名 simtunnel-<session> になる（小文字英数字とハイフンのみ）"
+        required: true
+        default: dev
+      device:
+        description: "Simulator のデバイス名"
+        required: true
+        default: iPhone 16
+      duration_minutes:
+        description: "セッション維持時間（分）"
+        required: true
+        default: "60"
+
+permissions:
+  id-token: write # Tailscale の OIDC (workload identity federation) 認証に必要
+  contents: read
+
+# 同名セッションの同時起動を防ぐ（tailnet ホスト名の衝突防止）
+concurrency:
+  group: simulator-session-${{ github.event.inputs.session }}
+  cancel-in-progress: false
+
+jobs:
+  session:
+    runs-on: macos-15
+    # 各 step が個別に時間制限を持つため、これは暴走時の最終防衛線
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: セッション名を検証
+        env:
+          SESSION: ${{ github.event.inputs.session }}
+        run: |
+          [[ "$SESSION" =~ ^[a-z0-9-]+$ ]] || {
+            echo "session は小文字英数字とハイフンのみ許可: $SESSION" >&2
+            exit 1
+          }
+
+      - name: Simulator を起動
+        timeout-minutes: 15
+        env:
+          DEVICE: ${{ github.event.inputs.device }}
+        run: ./runner/boot-simulator.sh "$DEVICE"
+
+      - name: WebDriverAgent を起動
+        timeout-minutes: 20
+        run: ./runner/start-wda.sh "$SIMULATOR_UDID"
+
+      # ここまで（WDA がローカルで応答するまで）tailnet に参加しない。
+      # 参照: PROJECT.md「リポジトリ公開に耐える安全性」
+      - name: Tailscale に参加
+        uses: tailscale/github-action@v4
+        with:
+          oauth-client-id: ${{ secrets.TS_OIDC_CLIENT_ID }}
+          audience: ${{ secrets.TS_OIDC_AUDIENCE }}
+          tags: tag:ci
+          hostname: simtunnel-${{ github.event.inputs.session }}
+
+      - name: WDA を tailnet へブリッジ
+        timeout-minutes: 10
+        run: ./runner/bridge.sh
+
+      - name: セッション情報を出力
+        env:
+          SESSION: ${{ github.event.inputs.session }}
+        run: |
+          TS_IP="$(tailscale ip -4 | head -1)"
+          {
+            echo "## SimTunnel session ready"
+            echo ""
+            echo "- hostname: \`simtunnel-${SESSION}\`"
+            echo "- tailscale IP: \`${TS_IP}\`"
+            echo "- WDA: http://simtunnel-${SESSION}:8100/status"
+            echo "- MJPEG: http://simtunnel-${SESSION}:9100"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: セッションを維持
+        env:
+          DURATION: ${{ github.event.inputs.duration_minutes }}
+        run: ./runner/keepalive.sh "$DURATION"
