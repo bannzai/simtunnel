@@ -1,0 +1,17 @@
+{
+  "name": "simtunnel-mcp",
+  "version": "0.1.0",
+  "description": "SimTunnel MCP server: WDA (WebDriverAgent) HTTP API を SIMTUNNEL_WDA_URL に向けて叩く",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "simtunnel-mcp": "./index.mjs"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.0",
+    "zod": "^3.24.0"
+  }
+}

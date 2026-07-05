@@ -171,7 +171,44 @@ simtunnel/
 │   └── keepalive.sh                  # duration_minutes までジョブを維持（WDA 死活監視付き）
 ├── local/
 │   └── simtunnel                     # ローカル CLI: up / down / list / status / screenshot / wait
-└── mcp/                              # Phase 3（未実装）: simtunnel-mcp（SIMTUNNEL_WDA_URL で接続先指定）
+└── mcp/                              # simtunnel-mcp（index.mjs。SIMTUNNEL_WDA_URL で接続先指定）
+```
+
+## MCP の登録
+
+事前に `mcp/` ディレクトリで `npm install` を 1 回実行しておく。
+
+### Claude Code（worktree ごとに別セッションを割り当てる）
+
+worktree のプロジェクトルートに `.mcp.json` を置く:
+
+```json
+{
+  "mcpServers": {
+    "simtunnel": {
+      "command": "node",
+      "args": ["<simtunnel リポジトリの絶対パス>/mcp/index.mjs"],
+      "env": { "SIMTUNNEL_WDA_URL": "http://simtunnel-<session>:8100" }
+    }
+  }
+}
+```
+
+コマンドで登録する場合:
+
+```bash
+claude mcp add simtunnel -e SIMTUNNEL_WDA_URL=http://simtunnel-<session>:8100 -- node <simtunnel リポジトリの絶対パス>/mcp/index.mjs
+```
+
+### Codex
+
+`~/.codex/config.toml`:
+
+```toml
+[mcp_servers.simtunnel]
+command = "node"
+args = ["<simtunnel リポジトリの絶対パス>/mcp/index.mjs"]
+env = { SIMTUNNEL_WDA_URL = "http://simtunnel-<session>:8100" }
 ```
 
 ## セッションのライフサイクル
@@ -226,10 +263,12 @@ simtunnel/
 - [x] アプリの install / launch を workflow input（`app_zip_url` / `bundle_id`）で指定可能にする（実装のみ。実アプリでの検証は対象アプリが決まってから行う）
 - 5 並列上限そのものの挙動確認は未実施（5 セッション必要になった時に確認する）
 
-### Phase 3: simtunnel-mcp
-- [ ] WDA API を直接叩く MCP サーバ実装（screenshot / tap / swipe / type / press_button / source / open_url）
-- [ ] `SIMTUNNEL_WDA_URL` で接続先指定。worktree ごとに `.mcp.json` で別セッションを登録
-- [ ] Claude Code / Codex 両対応（Codex は `~/.codex/config.toml` の MCP 設定）
+### Phase 3: simtunnel-mcp（完了: 2026-07-05）
+- [x] WDA API を直接叩く MCP サーバ実装（status / screen_info / screenshot / tap / swipe / type_text / press_button / source / open_url）
+- [x] `SIMTUNNEL_WDA_URL` で接続先指定（MJPEG URL は :9100 を自動導出。`SIMTUNNEL_MJPEG_URL` で上書き可）。WDA セッションは失効時に自動再作成
+- [x] MCP プロトコル経由の E2E 検証: initialize → tools/list → 全ツール実行。tap + type_text の結果が screenshot ツールの画像に反映されることを確認
+- [x] Claude Code / Codex 両対応の登録手順を記載（「MCP の登録」参照）
+- 座標系: screenshot はピクセル、tap / swipe はポイント。`screen_info` が返す scale（例: 3）で ピクセル ÷ scale = ポイント に変換する
 
 ### Phase 4: 拡張
 - [ ] simtunnel-agentd: runner 上の HTTP 受け口（tailnet 内限定）で simctl を遠隔実行
