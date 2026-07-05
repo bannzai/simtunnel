@@ -5,9 +5,10 @@ set -euo pipefail
 
 DEVICE_NAME="${1:?usage: boot-simulator.sh <device-name>}"
 
+# 同名デバイスが複数ランタイムに存在するため、ランタイムキーの降順 = 最新 OS を優先する
 UDID=$(xcrun simctl list devices available --json \
   | jq -r --arg name "$DEVICE_NAME" \
-      '[.devices | to_entries[] | select(.key | contains("iOS")) | .value[] | select(.name == $name)][0].udid // empty')
+      '[.devices | to_entries | sort_by(.key) | reverse | .[] | select(.key | contains("iOS")) | .value[] | select(.name == $name)][0].udid // empty')
 
 if [ -z "$UDID" ]; then
   echo "Simulator が見つからない: ${DEVICE_NAME}" >&2
