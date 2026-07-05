@@ -163,10 +163,12 @@ simtunnel/
 ├── CLAUDE.md
 ├── .github/workflows/
 │   └── simulator-session.yml         # workflow_dispatch: session 名を受けて Simulator セッションを張る
+├── iOSProject/                       # サンプルアプリ（SwiftUI + SwiftData / deployment target iOS 26.x）
 ├── runner/                           # GHA 側スクリプト
-│   ├── boot-simulator.sh             # simctl boot + 起動待ち
+│   ├── boot-simulator.sh             # simctl boot + 起動待ち（複数ランタイム時は最新 iOS を優先）
 │   ├── install-app.sh                # app_zip_url の .app を install / launch（未指定ならスキップ）
-│   ├── start-wda.sh                  # WDA を xcodebuild test で起動し :8100 応答まで待つ
+│   ├── build-sample-app.sh           # iOSProject を runner 上でビルドして install / launch
+│   ├── start-wda.sh                  # WDA を build-for-testing（キャッシュ対応）+ test-without-building で起動
 │   ├── bridge.sh                     # socat: tailscale IF → 127.0.0.1:8100/9100（直接到達可能ならスキップ）
 │   └── keepalive.sh                  # duration_minutes までジョブを維持（WDA 死活監視付き）
 ├── local/
@@ -260,8 +262,16 @@ env = { SIMTUNNEL_WDA_URL = "http://simtunnel-<session>:8100" }
 - [x] `local/simtunnel` CLI: `up` / `down` / `list` / `status` / `screenshot` / `wait`（up / down は冪等。down は run-name の `session=<name>` 一致で対象 run をキャンセル）
 - [x] `simtunnel screenshot <session>`: MJPEG フレーム抽出による高速スクリーンショット（1 枚約 80〜100KB / 数秒。`GET /screenshot` の 68 秒から大幅短縮）
 - [x] 複数セッション同時起動: dev-a / dev-b の 2 並列で検証。両方 ready まで約 4 分（Phase 1 の 10 分より速かった。WDA ビルド時間はばらつく）。tap を送ったセッションだけ画面が変わることをスクリーンショットで確認（独立性 OK）。終了後は両ノードとも tailnet から自動削除された
-- [x] アプリの install / launch を workflow input（`app_zip_url` / `bundle_id`）で指定可能にする（実装のみ。実アプリでの検証は対象アプリが決まってから行う）
+- [x] アプリの install / launch を workflow input（`app_zip_url` / `bundle_id`）で指定可能にする（`app_zip_url` 経路は実装のみ。実アプリ検証は下記「サンプルアプリ E2E」の repo 内ビルド方式で完了）
 - 5 並列上限そのものの挙動確認は未実施（5 セッション必要になった時に確認する）
+
+### サンプルアプリ E2E（完了: 2026-07-05）
+- [x] リポジトリに iOSProject（SwiftUI + SwiftData のテンプレート / deployment target iOS 26.5）を追加
+- [x] runner を macos-26（デフォルト Xcode 26.5 / iOS 26.x Simulator）へ移行。デフォルトデバイスは iPhone 17（macos-26 に iPhone 16 は無い）
+- [x] `sample_app` input（デフォルト true）: チェックアウト済みソースから runner 上でビルド → install → launch。.app を DERP の細い帯域で転送せずに済む
+- [x] E2E: 「+」を tap して SwiftData の Item 行が追加されることをスクリーンショットで確認
+- 実測（WDA キャッシュミス回）: dispatch → 操作可能まで約 7.5 分。内訳: Simulator boot 138 秒 / アプリビルド 119 秒 / WDA ビルド + 起動 131 秒（macos-26 runner は WDA ビルドがかなり速い）
+- ハマり: macos-26 は iOS 26.2 / 26.4 / 26.5 の複数ランタイムを持ち、古いランタイムの同名デバイスを掴むと新しい deployment target のアプリが destination エラーになる → boot-simulator.sh を最新ランタイム優先に変更した
 
 ### Phase 3: simtunnel-mcp（完了: 2026-07-05）
 - [x] WDA API を直接叩く MCP サーバ実装（status / screen_info / screenshot / tap / swipe / type_text / press_button / source / open_url）
