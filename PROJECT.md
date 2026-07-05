@@ -155,7 +155,7 @@ workflow 側は `permissions: id-token: write` を付け、`tailscale/github-act
 https://tailscale.com/docs/features/workload-identity-federation
 https://tailscale.com/kb/1623/trust-credentials
 
-## リポジトリ構成（予定）
+## リポジトリ構成
 
 ```text
 simtunnel/
@@ -165,12 +165,13 @@ simtunnel/
 │   └── simulator-session.yml         # workflow_dispatch: session 名を受けて Simulator セッションを張る
 ├── runner/                           # GHA 側スクリプト
 │   ├── boot-simulator.sh             # simctl boot + 起動待ち
+│   ├── install-app.sh                # app_zip_url の .app を install / launch（未指定ならスキップ）
 │   ├── start-wda.sh                  # WDA を xcodebuild test で起動し :8100 応答まで待つ
-│   ├── bridge.sh                     # socat: tailscale IF → 127.0.0.1:8100/9100
-│   └── keepalive.sh                  # 停止指示 or timeout までジョブを維持
+│   ├── bridge.sh                     # socat: tailscale IF → 127.0.0.1:8100/9100（直接到達可能ならスキップ）
+│   └── keepalive.sh                  # duration_minutes までジョブを維持（WDA 死活監視付き）
 ├── local/
-│   └── simtunnel                     # ローカル CLI: up / down / list / status / screenshot / tap
-└── mcp/                              # Phase 3: simtunnel-mcp（SIMTUNNEL_WDA_URL で接続先指定）
+│   └── simtunnel                     # ローカル CLI: up / down / list / status / screenshot / wait
+└── mcp/                              # Phase 3（未実装）: simtunnel-mcp（SIMTUNNEL_WDA_URL で接続先指定）
 ```
 
 ## セッションのライフサイクル
@@ -218,11 +219,12 @@ simtunnel/
 - WDA は Simulator でも 8100/9100 を全インターフェースで listen し、socat bridge は不要だった（bind 挙動が変わった時の保険として bridge.sh は残す）
 - DERP relay 経由の帯域が細く、PNG の `/screenshot` は実用に耐えない。スクリーンショットは MJPEG（:9100）のフレーム抽出（PNG 比 約 1/35 のサイズ）を既定にする
 
-### Phase 2: セッション管理・並列化
-- [ ] `local/simtunnel` CLI: `up <session>` / `down <session>` / `list` / `status <session>`
-- [ ] `simtunnel screenshot <session>`: MJPEG フレーム抽出による高速スクリーンショット（Phase 1 実測より `GET /screenshot` は使わない）
-- [ ] 複数セッション同時起動（同時実行上限 5 の挙動確認）
-- [ ] サンプルアプリの install / launch を workflow input で指定可能にする
+### Phase 2: セッション管理・並列化（完了: 2026-07-05）
+- [x] `local/simtunnel` CLI: `up` / `down` / `list` / `status` / `screenshot` / `wait`（up / down は冪等。down は run-name の `session=<name>` 一致で対象 run をキャンセル）
+- [x] `simtunnel screenshot <session>`: MJPEG フレーム抽出による高速スクリーンショット（1 枚約 80〜100KB / 数秒。`GET /screenshot` の 68 秒から大幅短縮）
+- [x] 複数セッション同時起動: dev-a / dev-b の 2 並列で検証。両方 ready まで約 4 分（Phase 1 の 10 分より速かった。WDA ビルド時間はばらつく）。tap を送ったセッションだけ画面が変わることをスクリーンショットで確認（独立性 OK）。終了後は両ノードとも tailnet から自動削除された
+- [x] アプリの install / launch を workflow input（`app_zip_url` / `bundle_id`）で指定可能にする（実装のみ。実アプリでの検証は対象アプリが決まってから行う）
+- 5 並列上限そのものの挙動確認は未実施（5 セッション必要になった時に確認する）
 
 ### Phase 3: simtunnel-mcp
 - [ ] WDA API を直接叩く MCP サーバ実装（screenshot / tap / swipe / type / press_button / source / open_url）
