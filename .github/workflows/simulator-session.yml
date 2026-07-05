@@ -16,7 +16,7 @@ on:
       device:
         description: "Simulator のデバイス名"
         required: true
-        default: iPhone 16
+        default: iPhone 17
       duration_minutes:
         description: "セッション維持時間（分）"
         required: true
@@ -29,6 +29,10 @@ on:
         description: "install 後に launch する bundle id（省略時は launch しない）"
         required: false
         default: ""
+      sample_app:
+        description: "リポジトリ内のサンプルアプリ (iOSProject) をビルドして launch する"
+        required: false
+        default: "true"
 
 permissions:
   id-token: write # Tailscale の OIDC (workload identity federation) 認証に必要
@@ -45,7 +49,8 @@ concurrency:
 
 jobs:
   session:
-    runs-on: macos-15
+    # サンプルアプリ (iOSProject) の deployment target が iOS 26.x のため macos-26 (Xcode 26.5)
+    runs-on: macos-26
     # 各 step が個別に時間制限を持つため、これは暴走時の最終防衛線
     timeout-minutes: 360
     steps:
@@ -83,6 +88,11 @@ jobs:
           APP_ZIP_URL: ${{ github.event.inputs.app_zip_url }}
           BUNDLE_ID: ${{ github.event.inputs.bundle_id }}
         run: ./runner/install-app.sh
+
+      - name: サンプルアプリをビルドして install / launch
+        if: github.event.inputs.sample_app == 'true'
+        timeout-minutes: 15
+        run: ./runner/build-sample-app.sh
 
       - name: WebDriverAgent を起動
         timeout-minutes: 20
