@@ -36,7 +36,7 @@ session_run_ids() {
 
 cmd_up() {
   local session=$1; shift
-  local device="iPhone 16" duration=60 ref="" app_zip_url="" bundle_id="" wait=0
+  local device="iPhone 17" duration=60 ref="" app_zip_url="" bundle_id="" wait=0
   while [ $# -gt 0 ]; do
     case "$1" in
       --device) device=$2; shift 2 ;;
