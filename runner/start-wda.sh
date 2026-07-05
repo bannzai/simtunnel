@@ -18,7 +18,9 @@ if curl -s -m 2 http://127.0.0.1:8100/status >/dev/null; then
 fi
 
 find_xctestrun() {
-  find "$PRODUCTS" -maxdepth 1 -name 'WebDriverAgentRunner_*.xctestrun' 2>/dev/null | head -1
+  # キャッシュ未復元だと $PRODUCTS 自体が存在せず find が非ゼロ終了するため先に確認する
+  [ -d "$PRODUCTS" ] || return 0
+  find "$PRODUCTS" -maxdepth 1 -name 'WebDriverAgentRunner_*.xctestrun' | head -1
 }
 
 XCTESTRUN="$(find_xctestrun)"
