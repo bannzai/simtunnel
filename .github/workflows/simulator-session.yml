@@ -4,6 +4,7 @@
 # 停止:
 #   gh run cancel <run-id> -R bannzai/simtunnel
 name: simulator-session
+run-name: "session=${{ inputs.session }} device=${{ inputs.device }}"
 
 on:
   workflow_dispatch:
@@ -20,6 +21,14 @@ on:
         description: "セッション維持時間（分）"
         required: true
         default: "60"
+      app_zip_url:
+        description: "Simulator 用 .app を zip した URL（省略時は install しない）"
+        required: false
+        default: ""
+      bundle_id:
+        description: "install 後に launch する bundle id（省略時は launch しない）"
+        required: false
+        default: ""
 
 permissions:
   id-token: write # Tailscale の OIDC (workload identity federation) 認証に必要
@@ -52,6 +61,13 @@ jobs:
         env:
           DEVICE: ${{ github.event.inputs.device }}
         run: ./runner/boot-simulator.sh "$DEVICE"
+
+      - name: アプリを install / launch
+        timeout-minutes: 10
+        env:
+          APP_ZIP_URL: ${{ github.event.inputs.app_zip_url }}
+          BUNDLE_ID: ${{ github.event.inputs.bundle_id }}
+        run: ./runner/install-app.sh
 
       - name: WebDriverAgent を起動
         timeout-minutes: 20

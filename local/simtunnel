@@ -1,0 +1,174 @@
+#!/bin/bash
+# SimTunnel ローカル CLI。GHA 上の iOS Simulator セッションを管理する。
+#
+# 使い方:
+#   simtunnel up <session> [--device "iPhone 16"] [--duration 60] [--ref <branch>] [--app-zip-url <url>] [--bundle-id <id>] [--wait]
+#   simtunnel down <session>
+#   simtunnel list
+#   simtunnel status <session>
+#   simtunnel screenshot <session> [出力パス]
+set -euo pipefail
+
+REPO="bannzai/simtunnel"
+WORKFLOW="simulator-session.yml"
+
+ts_bin() {
+  if command -v tailscale >/dev/null 2>&1; then
+    echo "tailscale"
+  else
+    echo "/Applications/Tailscale.app/Contents/MacOS/Tailscale"
+  fi
+}
+
+# tailnet に参加している simtunnel-<session> の IP を返す（未参加なら空）
+session_ip() {
+  local session=$1
+  "$(ts_bin)" status 2>/dev/null | awk -v h="simtunnel-${session}" '$2 == h {print $1; exit}'
+}
+
+# session 名に一致する実行中/待機中の run ID を列挙する
+session_run_ids() {
+  local session=$1
+  gh run list -R "$REPO" --workflow "$WORKFLOW" \
+    --json databaseId,displayTitle,status \
+    --jq ".[] | select(.status == \"in_progress\" or .status == \"queued\") | select(.displayTitle | startswith(\"session=${session} \")) | .databaseId"
+}
+
+cmd_up() {
+  local session=$1; shift
+  local device="iPhone 16" duration=60 ref="" app_zip_url="" bundle_id="" wait=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --device) device=$2; shift 2 ;;
+      --duration) duration=$2; shift 2 ;;
+      --ref) ref=$2; shift 2 ;;
+      --app-zip-url) app_zip_url=$2; shift 2 ;;
+      --bundle-id) bundle_id=$2; shift 2 ;;
+      --wait) wait=1; shift ;;
+      *) echo "不明なオプション: $1" >&2; exit 1 ;;
+    esac
+  done
+
+  if [ -n "$(session_ip "$session")" ]; then
+    echo "セッション ${session} はすでに tailnet に存在する（冪等: 何もしない）"
+    return 0
+  fi
+  if [ -n "$(session_run_ids "$session")" ]; then
+    echo "セッション ${session} の run はすでに起動中（準備中の可能性。simtunnel status ${session} で確認）"
+    return 0
+  fi
+
+  gh workflow run "$WORKFLOW" -R "$REPO" ${ref:+--ref "$ref"} \
+    -f session="$session" \
+    -f device="$device" \
+    -f duration_minutes="$duration" \
+    -f app_zip_url="$app_zip_url" \
+    -f bundle_id="$bundle_id"
+  echo "dispatched: session=${session} device=${device} duration=${duration}分${ref:+ ref=${ref}}"
+
+  if [ "$wait" -eq 1 ]; then
+    cmd_wait "$session"
+  else
+    echo "準備完了待ちは: simtunnel status ${session} または simtunnel up ${session} --wait"
+  fi
+}
+
+# WDA が応答するまで待つ（最大 20 分）
+cmd_wait() {
+  local session=$1
+  echo "simtunnel-${session} の準備完了を待機中（WDA ビルド込みで 10 分前後かかる）..."
+  for _ in $(seq 1 80); do
+    local ip
+    ip=$(session_ip "$session")
+    if [ -n "$ip" ] && curl -s -m 3 "http://${ip}:8100/status" >/dev/null 2>&1; then
+      echo "ready: http://simtunnel-${session}:8100 (${ip})"
+      return 0
+    fi
+    sleep 15
+  done
+  echo "20 分以内に準備完了しなかった。run の状態: gh run list -R ${REPO} -w ${WORKFLOW}" >&2
+  return 1
+}
+
+cmd_down() {
+  local session=$1
+  local ids
+  ids=$(session_run_ids "$session")
+  if [ -z "$ids" ]; then
+    echo "セッション ${session} の実行中 run はない（冪等: 何もしない）"
+    return 0
+  fi
+  local id
+  for id in $ids; do
+    gh run cancel "$id" -R "$REPO"
+    echo "cancelled: run ${id}"
+  done
+}
+
+cmd_list() {
+  echo "== tailnet 上のセッション =="
+  "$(ts_bin)" status 2>/dev/null | awk '$2 ~ /^simtunnel-/ {print $2 "  " $1}' | sort
+  echo ""
+  echo "== workflow run（直近 10 件）=="
+  gh run list -R "$REPO" --workflow "$WORKFLOW" -L 10
+}
+
+cmd_status() {
+  local session=$1
+  local ip
+  ip=$(session_ip "$session")
+  if [ -z "$ip" ]; then
+    echo "simtunnel-${session} は tailnet に存在しない（未起動 or 準備中）" >&2
+    return 1
+  fi
+  curl -s -m 10 -w "\nHTTP %{http_code} / %{time_total}s\n" "http://${ip}:8100/status"
+}
+
+# MJPEG (:9100) から最新の完全なフレームを 1 枚抽出する。
+# GET /screenshot (PNG) は DERP relay 経由だと 1 分超かかるため使わない（PROJECT.md「Phase 1 実測」参照）
+cmd_screenshot() {
+  local session=$1
+  local out=${2:-"./tmp/simtunnel-${session}-$(date +%H%M%S).jpg"}
+  local ip
+  ip=$(session_ip "$session")
+  [ -n "$ip" ] || { echo "simtunnel-${session} は tailnet に存在しない" >&2; return 1; }
+
+  mkdir -p "$(dirname "$out")"
+  local raw
+  raw=$(mktemp)
+  # DERP 経由 (約 60KB/s) で 1 フレーム約 110KB のため、15 秒あれば複数フレーム集まる
+  curl -s -m 15 "http://${ip}:9100" -o "$raw" || true
+
+  RAW="$raw" OUT="$out" python3 - <<'EOF'
+import os, sys
+data = open(os.environ["RAW"], "rb").read()
+# 最後に完成しているフレーム = 最新の画面
+end = data.rfind(b"\xff\xd9")
+start = data.rfind(b"\xff\xd8", 0, end) if end > 0 else -1
+if start < 0 or end < 0:
+    print(f"フレームを取得できなかった (受信 {len(data)} bytes)。セッションの準備状態を確認", file=sys.stderr)
+    sys.exit(1)
+open(os.environ["OUT"], "wb").write(data[start:end + 2])
+print(f"saved: {os.environ['OUT']} ({end + 2 - start} bytes)")
+EOF
+}
+
+main() {
+  local cmd=${1:-}
+  case "$cmd" in
+    up|down|status|screenshot|wait)
+      [ $# -ge 2 ] || { echo "session 名を指定して: simtunnel ${cmd} <session>" >&2; exit 1; }
+      shift
+      "cmd_${cmd}" "$@"
+      ;;
+    list)
+      cmd_list
+      ;;
+    *)
+      sed -n '2,9p' "$0" | sed 's/^# \{0,1\}//'
+      exit 1
+      ;;
+  esac
+}
+
+main "$@"
