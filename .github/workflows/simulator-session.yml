@@ -34,6 +34,10 @@ permissions:
   id-token: write # Tailscale の OIDC (workload identity federation) 認証に必要
   contents: read
 
+env:
+  # WebDriverAgent のバージョン固定（ビルドキャッシュのキーにもなる）
+  WDA_REF: v15.1.3
+
 # 同名セッションの同時起動を防ぐ（tailnet ホスト名の衝突防止）
 concurrency:
   group: simulator-session-${{ github.event.inputs.session }}
@@ -56,6 +60,17 @@ jobs:
             exit 1
           }
 
+      - name: Xcode バージョンを取得（キャッシュキー用）
+        id: xcode
+        run: echo "version=$(xcodebuild -version | tr '\n' '_' | tr ' ' '.')" >> "$GITHUB_OUTPUT"
+
+      - name: WDA ビルドキャッシュを復元
+        id: wda-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: wda-dd/Build/Products
+          key: wda-${{ env.WDA_REF }}-${{ runner.arch }}-${{ steps.xcode.outputs.version }}
+
       - name: Simulator を起動
         timeout-minutes: 15
         env:
@@ -72,6 +87,15 @@ jobs:
       - name: WebDriverAgent を起動
         timeout-minutes: 20
         run: ./runner/start-wda.sh "$SIMULATOR_UDID"
+
+      # キャッシュミス時のみ保存する。ジョブは down で cancel されるため、
+      # post step 任せにせずビルド直後に明示的に保存する
+      - name: WDA ビルドキャッシュを保存
+        if: steps.wda-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: wda-dd/Build/Products
+          key: wda-${{ env.WDA_REF }}-${{ runner.arch }}-${{ steps.xcode.outputs.version }}
 
       # ここまで（WDA がローカルで応答するまで）tailnet に参加しない。
       # 参照: PROJECT.md「リポジトリ公開に耐える安全性」
