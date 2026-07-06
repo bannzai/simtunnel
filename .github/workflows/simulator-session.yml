@@ -1,4 +1,5 @@
-# iOS Simulator セッションを張る workflow。
+# iOS Simulator セッションを張る workflow（simtunnel 自身用の workflow_dispatch ラッパー）。
+# 実体は session.yml（reusable workflow）。他リポジトリからの利用は PROJECT.md「各アプリ repo での実行」参照。
 # 起動例:
 #   gh workflow run simulator-session.yml -f session=dev -f duration_minutes=60
 # 停止:
@@ -42,117 +43,18 @@ permissions:
   id-token: write # Tailscale の OIDC (workload identity federation) 認証に必要
   contents: read
 
-env:
-  # WebDriverAgent のバージョン固定（ビルドキャッシュのキーにもなる）
-  WDA_REF: v15.1.3
-
-# 同名セッションの同時起動を防ぐ（tailnet ホスト名の衝突防止）
-concurrency:
-  group: simulator-session-${{ github.event.inputs.session }}
-  cancel-in-progress: false
-
 jobs:
   session:
-    # サンプルアプリ (iOSProject) の deployment target が iOS 26.x のため macos-26 (Xcode 26.5)
-    runs-on: macos-26
-    # 各 step が個別に時間制限を持つため、これは暴走時の最終防衛線
-    timeout-minutes: 360
-    steps:
-      # タグは可変で差し替えられうるため commit SHA で固定する（参照: PROJECT.md「リポジトリ公開に耐える安全性」）
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
-
-      - name: セッション名を検証
-        env:
-          SESSION: ${{ github.event.inputs.session }}
-        run: |
-          [[ "$SESSION" =~ ^[a-z0-9-]+$ ]] || {
-            echo "session は小文字英数字とハイフンのみ許可: $SESSION" >&2
-            exit 1
-          }
-
-      - name: Xcode バージョンを取得（キャッシュキー用）
-        id: xcode
-        run: echo "version=$(xcodebuild -version | tr '\n' '_' | tr ' ' '.')" >> "$GITHUB_OUTPUT"
-
-      - name: WDA ビルドキャッシュを復元
-        id: wda-cache
-        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
-        with:
-          path: wda-dd/Build/Products
-          key: wda-${{ env.WDA_REF }}-${{ runner.arch }}-${{ steps.xcode.outputs.version }}
-
-      - name: Simulator を起動
-        timeout-minutes: 15
-        env:
-          DEVICE: ${{ github.event.inputs.device }}
-        run: ./runner/boot-simulator.sh "$DEVICE"
-
-      - name: アプリを install / launch
-        timeout-minutes: 10
-        env:
-          APP_ZIP_URL: ${{ github.event.inputs.app_zip_url }}
-          BUNDLE_ID: ${{ github.event.inputs.bundle_id }}
-        run: ./runner/install-app.sh
-
-      - name: サンプルアプリをビルドして install / launch
-        if: github.event.inputs.sample_app == 'true'
-        timeout-minutes: 15
-        run: ./runner/build-sample-app.sh
-
-      - name: WebDriverAgent を起動
-        timeout-minutes: 20
-        run: ./runner/start-wda.sh "$SIMULATOR_UDID"
-
-      - name: serve-sim を起動
-        if: github.event.inputs.serve_sim == 'true'
-        timeout-minutes: 10
-        run: ./runner/start-serve-sim.sh "$SIMULATOR_UDID"
-
-      # キャッシュミス時のみ保存する。ジョブは down で cancel されるため、
-      # post step 任せにせずビルド直後に明示的に保存する
-      - name: WDA ビルドキャッシュを保存
-        if: steps.wda-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
-        with:
-          path: wda-dd/Build/Products
-          key: wda-${{ env.WDA_REF }}-${{ runner.arch }}-${{ steps.xcode.outputs.version }}
-
-      # ここまで（WDA がローカルで応答するまで）tailnet に参加しない。
-      # 参照: PROJECT.md「リポジトリ公開に耐える安全性」
-      - name: Tailscale に参加
-        uses: tailscale/github-action@306e68a486fd2350f2bfc3b19fcd143891a4a2d8 # v4.1.2
-        with:
-          oauth-client-id: ${{ secrets.TS_OIDC_CLIENT_ID }}
-          audience: ${{ secrets.TS_OIDC_AUDIENCE }}
-          tags: tag:ci
-          hostname: simtunnel-${{ github.event.inputs.session }}
-
-      # serve-sim は preview UI とストリーム (/helper/<UDID>/stream.mjpeg) をどちらも :3200 で配信するため 3200 のみ公開する
-      - name: tailnet へブリッジ
-        timeout-minutes: 10
-        env:
-          EXTRA_PORTS: ${{ github.event.inputs.serve_sim == 'true' && '3200' || '' }}
-        run: ./runner/bridge.sh 8100 9100 $EXTRA_PORTS
-
-      - name: セッション情報を出力
-        env:
-          SESSION: ${{ github.event.inputs.session }}
-          SERVE_SIM: ${{ github.event.inputs.serve_sim }}
-        run: |
-          TS_IP="$(tailscale ip -4 | head -1)"
-          {
-            echo "## SimTunnel session ready"
-            echo ""
-            echo "- hostname: \`simtunnel-${SESSION}\`"
-            echo "- tailscale IP: \`${TS_IP}\`"
-            echo "- WDA: http://simtunnel-${SESSION}:8100/status"
-            echo "- MJPEG: http://simtunnel-${SESSION}:9100"
-            if [ "$SERVE_SIM" = "true" ]; then
-              echo "- preview UI（ブラウザ操作）: http://simtunnel-${SESSION}:3200"
-            fi
-          } | tee -a "$GITHUB_STEP_SUMMARY"
-
-      - name: セッションを維持
-        env:
-          DURATION: ${{ github.event.inputs.duration_minutes }}
-        run: ./runner/keepalive.sh "$DURATION"
+    uses: ./.github/workflows/session.yml
+    with:
+      session: ${{ inputs.session }}
+      device: ${{ inputs.device }}
+      duration_minutes: ${{ inputs.duration_minutes }}
+      app_zip_url: ${{ inputs.app_zip_url }}
+      bundle_id: ${{ inputs.bundle_id }}
+      build_project: ${{ inputs.sample_app == 'true' && 'iOSProject/iOSProject.xcodeproj' || '' }}
+      build_scheme: ${{ inputs.sample_app == 'true' && 'iOSProject' || '' }}
+      serve_sim: ${{ inputs.serve_sim }}
+    secrets:
+      TS_OIDC_CLIENT_ID: ${{ secrets.TS_OIDC_CLIENT_ID }}
+      TS_OIDC_AUDIENCE: ${{ secrets.TS_OIDC_AUDIENCE }}
