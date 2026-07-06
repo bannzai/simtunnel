@@ -10,6 +10,7 @@ CONFIGURATION="${BUILD_CONFIGURATION:-Debug}"
 ROOT="${GITHUB_WORKSPACE:-$(pwd)}"
 WORK="${RUNNER_TEMP:-$(pwd)/tmp}"
 DD="${ROOT}/app-dd"
+mkdir -p "$WORK"
 
 case "$PROJECT" in
   *.xcworkspace) CONTAINER=(-workspace "${ROOT}/${PROJECT}") ;;

@@ -63,12 +63,12 @@ cmd_up() {
     return 0
   fi
 
-  gh workflow run "$WORKFLOW" -R "$REPO" ${ref:+--ref "$ref"} \
-    -f session="$session" \
-    -f device="$device" \
-    -f duration_minutes="$duration" \
-    -f app_zip_url="$app_zip_url" \
-    -f bundle_id="$bundle_id"
+  # workflow 側で未定義の input を送ると dispatch 自体が拒否されるため、
+  # 空の任意 input は送らない（app_zip_url / bundle_id を宣言しない薄い caller workflow に対応）
+  local -a inputs=(-f session="$session" -f device="$device" -f duration_minutes="$duration")
+  if [ -n "$app_zip_url" ]; then inputs+=(-f app_zip_url="$app_zip_url"); fi
+  if [ -n "$bundle_id" ]; then inputs+=(-f bundle_id="$bundle_id"); fi
+  gh workflow run "$WORKFLOW" -R "$REPO" ${ref:+--ref "$ref"} "${inputs[@]}"
   echo "dispatched: session=${session} device=${device} duration=${duration}分${ref:+ ref=${ref}}"
 
   if [ "$wait" -eq 1 ]; then
