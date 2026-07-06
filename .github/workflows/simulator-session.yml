@@ -33,6 +33,10 @@ on:
         description: "リポジトリ内のサンプルアプリ (iOSProject) をビルドして launch する"
         required: false
         default: "true"
+      serve_sim:
+        description: "serve-sim を起動する（ブラウザから見る・操作する preview UI :3200 / stream :3100）"
+        required: false
+        default: "true"
 
 permissions:
   id-token: write # Tailscale の OIDC (workload identity federation) 認証に必要
@@ -98,6 +102,11 @@ jobs:
         timeout-minutes: 20
         run: ./runner/start-wda.sh "$SIMULATOR_UDID"
 
+      - name: serve-sim を起動
+        if: github.event.inputs.serve_sim == 'true'
+        timeout-minutes: 10
+        run: ./runner/start-serve-sim.sh "$SIMULATOR_UDID"
+
       # キャッシュミス時のみ保存する。ジョブは down で cancel されるため、
       # post step 任せにせずビルド直後に明示的に保存する
       - name: WDA ビルドキャッシュを保存
@@ -117,13 +126,17 @@ jobs:
           tags: tag:ci
           hostname: simtunnel-${{ github.event.inputs.session }}
 
-      - name: WDA を tailnet へブリッジ
+      # serve-sim は preview UI とストリーム (/helper/<UDID>/stream.mjpeg) をどちらも :3200 で配信するため 3200 のみ公開する
+      - name: tailnet へブリッジ
         timeout-minutes: 10
-        run: ./runner/bridge.sh
+        env:
+          EXTRA_PORTS: ${{ github.event.inputs.serve_sim == 'true' && '3200' || '' }}
+        run: ./runner/bridge.sh 8100 9100 $EXTRA_PORTS
 
       - name: セッション情報を出力
         env:
           SESSION: ${{ github.event.inputs.session }}
+          SERVE_SIM: ${{ github.event.inputs.serve_sim }}
         run: |
           TS_IP="$(tailscale ip -4 | head -1)"
           {
@@ -133,6 +146,9 @@ jobs:
             echo "- tailscale IP: \`${TS_IP}\`"
             echo "- WDA: http://simtunnel-${SESSION}:8100/status"
             echo "- MJPEG: http://simtunnel-${SESSION}:9100"
+            if [ "$SERVE_SIM" = "true" ]; then
+              echo "- preview UI（ブラウザ操作）: http://simtunnel-${SESSION}:3200"
+            fi
           } | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: セッションを維持

@@ -7,6 +7,7 @@
 #   simtunnel list
 #   simtunnel status <session>
 #   simtunnel screenshot <session> [出力パス]
+#   simtunnel preview <session>   # ブラウザで preview UI（見る + 操作）を開く
 set -euo pipefail
 
 REPO="bannzai/simtunnel"
@@ -153,10 +154,20 @@ print(f"saved: {os.environ['OUT']} ({end + 2 - start} bytes)")
 EOF
 }
 
+# serve-sim の preview UI をブラウザで開く。
+# preview UI は Host ヘッダから stream URL を組み立てるため、IP ではなく MagicDNS 名で開く
+cmd_preview() {
+  local session=$1
+  [ -n "$(session_ip "$session")" ] || { echo "simtunnel-${session} は tailnet に存在しない" >&2; return 1; }
+  local url="http://simtunnel-${session}:3200"
+  echo "open: ${url}"
+  open "$url"
+}
+
 main() {
   local cmd=${1:-}
   case "$cmd" in
-    up|down|status|screenshot|wait)
+    up|down|status|screenshot|wait|preview)
       [ $# -ge 2 ] || { echo "session 名を指定して: simtunnel ${cmd} <session>" >&2; exit 1; }
       shift
       "cmd_${cmd}" "$@"
