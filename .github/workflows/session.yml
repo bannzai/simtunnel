@@ -82,7 +82,7 @@ jobs:
           SESSION: ${{ inputs.session }}
           BUILD_PROJECT: ${{ inputs.build_project }}
           BUILD_SCHEME: ${{ inputs.build_scheme }}
-          JOB_WORKFLOW_SHA: ${{ github.job_workflow_sha }}
+          JOB_WORKFLOW_SHA: ${{ job.workflow_sha }}
         run: |
           [[ "$SESSION" =~ ^[a-z0-9-]+$ ]] || {
             echo "session は小文字英数字とハイフンのみ許可: $SESSION" >&2
@@ -94,19 +94,20 @@ jobs:
           fi
           # 空だと simtunnel の checkout がデフォルトブランチに落ちて workflow と scripts の版がずれる
           [ -n "$JOB_WORKFLOW_SHA" ] || {
-            echo "github.job_workflow_sha が空。runner スクリプトの版を固定できないため中断" >&2
+            echo "job.workflow_sha が空。runner スクリプトの版を固定できないため中断" >&2
             exit 1
           }
 
       # タグは可変で差し替えられうるため commit SHA で固定する（参照: PROJECT.md「リポジトリ公開に耐える安全性」）
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
 
-      # runner スクリプトは caller リポジトリには無いため、この workflow と同一 commit の simtunnel を取得する
+      # runner スクリプトは caller リポジトリには無いため、この workflow ファイルと同一 repo・同一 commit を取得する
+      # （job.workflow_sha / job.workflow_repository は reusable workflow では呼ばれた workflow ファイルを指す）
       - name: simtunnel（runner スクリプト）を checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
-          repository: bannzai/simtunnel
-          ref: ${{ github.job_workflow_sha }}
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
           path: simtunnel
 
       - name: Xcode バージョンを取得（キャッシュキー用）
