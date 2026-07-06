@@ -147,6 +147,7 @@ jobs:
       # runner 間の転送は GitHub 内部で完結するため DERP 帯域の制約を受けない
       - name: artifact のアプリをダウンロード
         if: inputs.app_artifact != ''
+        timeout-minutes: 10
         uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
         with:
           name: ${{ inputs.app_artifact }}
