@@ -143,6 +143,8 @@ run-name: "session=${{ inputs.session }} device=${{ inputs.device }}"
 
 on:
   workflow_dispatch: # fork PR に Secrets を渡さないため workflow_dispatch のみ
+    # session / device / duration_minutes は local/simtunnel の up が常に送るため宣言必須
+    # （未定義の input を送ると dispatch が拒否される）
     inputs:
       session:
         required: true

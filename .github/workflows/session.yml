@@ -99,7 +99,10 @@ jobs:
           }
 
       # タグは可変で差し替えられうるため commit SHA で固定する（参照: PROJECT.md「リポジトリ公開に耐える安全性」）
+      # checkout 後に git 認証は使わないため token を .git/config に残さない（xcodebuild の build phase 等からの読み出し防止）
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
 
       # runner スクリプトは caller リポジトリには無いため、この workflow ファイルと同一 repo・同一 commit を取得する
       # （job.workflow_sha / job.workflow_repository は reusable workflow では呼ばれた workflow ファイルを指す）
@@ -109,6 +112,7 @@ jobs:
           repository: ${{ job.workflow_repository }}
           ref: ${{ job.workflow_sha }}
           path: simtunnel
+          persist-credentials: false
 
       - name: Xcode バージョンを取得（キャッシュキー用）
         id: xcode
