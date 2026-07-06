@@ -8,7 +8,7 @@
 #   simtunnel status <session>
 #   simtunnel screenshot <session> [出力パス]
 #   simtunnel preview <session>   # ブラウザで preview UI（見る + 操作）を開く
-#   simtunnel mcp-config <session> [ディレクトリ]   # ディレクトリ直下の .mcp.json に simtunnel MCP 設定を書き込む
+#   simtunnel mcp-config <session> [ディレクトリ] [--name mobile]   # ディレクトリ直下の .mcp.json に simtunnel MCP 設定を書き込む
 set -euo pipefail
 
 REPO="bannzai/simtunnel"
@@ -156,10 +156,18 @@ EOF
 }
 
 # 指定ディレクトリ（既定はカレント）直下の .mcp.json に simtunnel MCP サーバの設定を書き込む。
-# 既存の .mcp.json があれば simtunnel 以外のエントリは保持してマージする（冪等）
+# 既存の .mcp.json があれば対象サーバ名以外のエントリは保持してマージする（冪等）。
+# --name mobile にすると mcp__mobile__* のツール名になり、mobile-mcp 前提の既存 skill と互換になる
 cmd_mcp_config() {
   local session=$1
-  local dir=${2:-.}
+  shift
+  local dir="." name="simtunnel"
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --name) name=$2; shift 2 ;;
+      *) dir=$1; shift ;;
+    esac
+  done
   command -v jq >/dev/null 2>&1 || { echo "jq が必要（brew install jq）" >&2; return 1; }
   [ -d "$dir" ] || { echo "ディレクトリが存在しない: $dir" >&2; return 1; }
 
@@ -172,11 +180,12 @@ cmd_mcp_config() {
   fi
   merged=$(jq -n \
     --argjson existing "$existing" \
+    --arg name "$name" \
     --arg mjs "${repo_root}/mcp/index.mjs" \
     --arg url "http://simtunnel-${session}:8100" \
-    '$existing * {mcpServers: {simtunnel: {command: "node", args: [$mjs], env: {SIMTUNNEL_WDA_URL: $url}}}}')
+    '$existing * {mcpServers: {($name): {command: "node", args: [$mjs], env: {SIMTUNNEL_WDA_URL: $url}}}}')
   printf '%s\n' "$merged" > "$file"
-  echo "wrote: ${file} (SIMTUNNEL_WDA_URL=http://simtunnel-${session}:8100)"
+  echo "wrote: ${file} (server=${name}, SIMTUNNEL_WDA_URL=http://simtunnel-${session}:8100)"
 }
 
 # serve-sim の preview UI をブラウザで開く。
