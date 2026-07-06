@@ -437,4 +437,4 @@ env = { SIMTUNNEL_WDA_URL = "http://simtunnel-<session>:8100" }
 - **repo を跨いだ同名セッション**: 同時起動防止の concurrency group は repo 単位のため、別 repo で同名セッションを起動すると tailnet ホスト名 `simtunnel-<session>` が衝突する。repo ごとに接頭辞を変える等、セッション名の一意性は運用で担保する
 - **Runner スペック**: GitHub-hosted macOS (arm64) はメモリが小さめ。1 runner 複数 Simulator の成立性は要検証
 - **MagicDNS の伝播ラグ**: ephemeral node の tailnet 参加後、`simtunnel-<session>` の名前解決ができるまで数分かかることがある（実測 2026-07-06。IP 直なら即到達可能）。`.mcp.json` のホスト名接続が ready 直後に ENOTFOUND になったら少し待って再試行する
-- **keepalive 開始直後の WDA 無応答**: keepalive の死活チェックが開始 5 秒で失敗し run が failure 終了した事例を 1 回観測（2026-07-06。再現条件未特定。同日は runner が全体に遅く、サンプルアプリのビルドが通常 2 分 → 10 分超だった）。セッションが早期に消えたら run の failure step を確認し、再度 `up` する
+- **keepalive 中の WDA 無応答**: keepalive の死活チェックが失敗し run が failure 終了する事象を計 3 回観測（2026-07-06: simtunnel 本体で開始 5 秒後 x1、Pilll で開始 約5 分後 / 35 秒後 x2）。重いアプリ（Flutter + Firebase の Pilll）のセッションで発生率が高く、runner のメモリ圧が疑わしい（GitHub-hosted macOS runner は RAM が小さい）。対策として keepalive は連続 4 回失敗した時だけ終了し、終了時に wda.log 末尾を出力する。セッションが早期に消えたら run の failure step と wda.log を確認し、再度 `up` する。切り分け用に caller で `serve_sim: "false"` にしてメモリ消費を減らす手もある
