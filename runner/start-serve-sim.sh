@@ -9,8 +9,9 @@ UDID="${1:?usage: start-serve-sim.sh <simulator-udid>}"
 WORK="${RUNNER_TEMP:-$(pwd)/tmp}"
 LOG="${WORK}/serve-sim.log"
 
+# serve-sim (Node) は localhost bind 時に ::1 側だけで listen することがあるため両方見る
 port_open() {
-  (echo -n > "/dev/tcp/127.0.0.1/$1") >/dev/null 2>&1
+  nc -z -w 2 127.0.0.1 "$1" >/dev/null 2>&1 || nc -z -w 2 ::1 "$1" >/dev/null 2>&1
 }
 
 if port_open 3200 && port_open 3100; then

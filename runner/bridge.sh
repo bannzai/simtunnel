@@ -9,7 +9,7 @@ echo "tailscale IP: ${TS_IP}"
 
 reachable() {
   local port=$1
-  (echo -n > "/dev/tcp/${TS_IP}/${port}") >/dev/null 2>&1
+  nc -z -w 2 "$TS_IP" "$port" >/dev/null 2>&1
 }
 
 ensure_bridge() {
@@ -18,11 +18,16 @@ ensure_bridge() {
     echo "port ${port}: すでに ${TS_IP} で到達可能（bridge 不要）"
     return 0
   fi
+  # 中継先の loopback は IPv4 / IPv6 のどちらで listen しているか分からないため実測で選ぶ
+  local upstream="TCP:127.0.0.1:${port}"
+  if ! nc -z -w 2 127.0.0.1 "$port" >/dev/null 2>&1 && nc -z -w 2 ::1 "$port" >/dev/null 2>&1; then
+    upstream="TCP6:[::1]:${port}"
+  fi
   command -v socat >/dev/null 2>&1 || brew install socat
-  nohup socat "TCP-LISTEN:${port},bind=${TS_IP},fork,reuseaddr" "TCP:127.0.0.1:${port}" >/dev/null 2>&1 &
+  nohup socat "TCP-LISTEN:${port},bind=${TS_IP},fork,reuseaddr" "$upstream" >/dev/null 2>&1 &
   sleep 1
   reachable "$port" || { echo "port ${port}: bridge の起動に失敗" >&2; exit 1; }
-  echo "port ${port}: bridged ${TS_IP}:${port} -> 127.0.0.1:${port}"
+  echo "port ${port}: bridged ${TS_IP}:${port} -> ${upstream}"
 }
 
 PORTS=("$@")
