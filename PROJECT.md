@@ -197,6 +197,12 @@ worktree のプロジェクトルートに `.mcp.json` を置く:
 }
 ```
 
+生成ヘルパーで書き込む場合（既存 `.mcp.json` の simtunnel 以外のエントリは保持される）:
+
+```bash
+<simtunnel リポジトリの絶対パス>/local/simtunnel mcp-config <session> [worktree のパス]
+```
+
 コマンドで登録する場合:
 
 ```bash
