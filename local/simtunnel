@@ -8,6 +8,7 @@
 #   simtunnel status <session>
 #   simtunnel screenshot <session> [出力パス]
 #   simtunnel preview <session>   # ブラウザで preview UI（見る + 操作）を開く
+#   simtunnel mcp-config <session> [ディレクトリ]   # ディレクトリ直下の .mcp.json に simtunnel MCP 設定を書き込む
 set -euo pipefail
 
 REPO="bannzai/simtunnel"
@@ -154,6 +155,30 @@ print(f"saved: {os.environ['OUT']} ({end + 2 - start} bytes)")
 EOF
 }
 
+# 指定ディレクトリ（既定はカレント）直下の .mcp.json に simtunnel MCP サーバの設定を書き込む。
+# 既存の .mcp.json があれば simtunnel 以外のエントリは保持してマージする（冪等）
+cmd_mcp_config() {
+  local session=$1
+  local dir=${2:-.}
+  command -v jq >/dev/null 2>&1 || { echo "jq が必要（brew install jq）" >&2; return 1; }
+  [ -d "$dir" ] || { echo "ディレクトリが存在しない: $dir" >&2; return 1; }
+
+  local repo_root file existing merged
+  repo_root=$(cd "$(dirname "$0")/.." && pwd)
+  file="${dir%/}/.mcp.json"
+  existing="{}"
+  if [ -f "$file" ]; then
+    existing=$(jq . "$file") || { echo "既存の ${file} が JSON として不正。手で直してから再実行して" >&2; return 1; }
+  fi
+  merged=$(jq -n \
+    --argjson existing "$existing" \
+    --arg mjs "${repo_root}/mcp/index.mjs" \
+    --arg url "http://simtunnel-${session}:8100" \
+    '$existing * {mcpServers: {simtunnel: {command: "node", args: [$mjs], env: {SIMTUNNEL_WDA_URL: $url}}}}')
+  printf '%s\n' "$merged" > "$file"
+  echo "wrote: ${file} (SIMTUNNEL_WDA_URL=http://simtunnel-${session}:8100)"
+}
+
 # serve-sim の preview UI をブラウザで開く。
 # preview UI は Host ヘッダから stream URL を組み立てるため、IP ではなく MagicDNS 名で開く
 cmd_preview() {
@@ -172,11 +197,16 @@ main() {
       shift
       "cmd_${cmd}" "$@"
       ;;
+    mcp-config)
+      [ $# -ge 2 ] || { echo "session 名を指定して: simtunnel mcp-config <session>" >&2; exit 1; }
+      shift
+      cmd_mcp_config "$@"
+      ;;
     list)
       cmd_list
       ;;
     *)
-      sed -n '2,9p' "$0" | sed 's/^# \{0,1\}//'
+      sed -n '2,11p' "$0" | sed 's/^# \{0,1\}//'
       exit 1
       ;;
   esac
