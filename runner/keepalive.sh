@@ -1,6 +1,6 @@
 #!/bin/bash
 # 指定時間だけジョブを維持する。WDA が応答しなくなったら維持する意味がないため終了する。
-# 途中で止める場合はローカルから: gh run cancel <run-id> -R bannzai/simtunnel
+# 途中で止める場合はローカルから: gh run cancel <run-id> -R <workflow を動かしている repo>
 set -euo pipefail
 
 DURATION_MINUTES="${1:?usage: keepalive.sh <duration-minutes>}"

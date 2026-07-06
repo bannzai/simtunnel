@@ -9,10 +9,13 @@
 #   simtunnel screenshot <session> [出力パス]
 #   simtunnel preview <session>   # ブラウザで preview UI（見る + 操作）を開く
 #   simtunnel mcp-config <session> [ディレクトリ] [--name mobile]   # ディレクトリ直下の .mcp.json に simtunnel MCP 設定を書き込む
+#
+# 対象リポジトリの切り替え（各アプリ repo の caller workflow を叩く場合）:
+#   SIMTUNNEL_REPO=<owner>/<repo> [SIMTUNNEL_WORKFLOW=simulator-session.yml] simtunnel up <session>
 set -euo pipefail
 
-REPO="bannzai/simtunnel"
-WORKFLOW="simulator-session.yml"
+REPO="${SIMTUNNEL_REPO:-bannzai/simtunnel}"
+WORKFLOW="${SIMTUNNEL_WORKFLOW:-simulator-session.yml}"
 
 ts_bin() {
   if command -v tailscale >/dev/null 2>&1; then
