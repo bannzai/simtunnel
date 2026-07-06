@@ -39,12 +39,12 @@ on:
         required: false
         default: "true"
 
-permissions:
-  id-token: write # Tailscale の OIDC (workload identity federation) 認証に必要
-  contents: read
-
 jobs:
   session:
+    # id-token: write が必要なのは reusable workflow を呼ぶこの job だけのため、job 単位で最小権限にする
+    permissions:
+      id-token: write # Tailscale の OIDC (workload identity federation) 認証に必要
+      contents: read
     uses: ./.github/workflows/session.yml
     with:
       session: ${{ inputs.session }}
