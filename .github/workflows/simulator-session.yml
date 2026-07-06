@@ -126,10 +126,11 @@ jobs:
           tags: tag:ci
           hostname: simtunnel-${{ github.event.inputs.session }}
 
-      - name: WDA を tailnet へブリッジ
+      # serve-sim は preview UI とストリーム (/helper/<UDID>/stream.mjpeg) をどちらも :3200 で配信するため 3200 のみ公開する
+      - name: tailnet へブリッジ
         timeout-minutes: 10
         env:
-          EXTRA_PORTS: ${{ github.event.inputs.serve_sim == 'true' && '3100 3200' || '' }}
+          EXTRA_PORTS: ${{ github.event.inputs.serve_sim == 'true' && '3200' || '' }}
         run: ./runner/bridge.sh 8100 9100 $EXTRA_PORTS
 
       - name: セッション情報を出力

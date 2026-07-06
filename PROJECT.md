@@ -169,10 +169,11 @@ simtunnel/
 │   ├── install-app.sh                # app_zip_url の .app を install / launch（未指定ならスキップ）
 │   ├── build-sample-app.sh           # iOSProject を runner 上でビルドして install / launch
 │   ├── start-wda.sh                  # WDA を build-for-testing（キャッシュ対応）+ test-without-building で起動
-│   ├── bridge.sh                     # socat: tailscale IF → 127.0.0.1:8100/9100（直接到達可能ならスキップ）
+│   ├── start-serve-sim.sh            # serve-sim を起動（ブラウザ操作 UI + ライブ映像を :3200 で配信）
+│   ├── bridge.sh                     # socat: tailscale IF → 指定ポート（直接到達可能ならスキップ）
 │   └── keepalive.sh                  # duration_minutes までジョブを維持（WDA 死活監視付き）
 ├── local/
-│   └── simtunnel                     # ローカル CLI: up / down / list / status / screenshot / wait
+│   └── simtunnel                     # ローカル CLI: up / down / list / status / screenshot / preview / wait
 └── mcp/                              # simtunnel-mcp（index.mjs。SIMTUNNEL_WDA_URL で接続先指定）
 ```
 
@@ -284,6 +285,10 @@ env = { SIMTUNNEL_WDA_URL = "http://simtunnel-<session>:8100" }
 - [x] WDA のビルド高速化（完了: 2026-07-05）: WDA を `WDA_REF`（v15.1.3）に固定し、`build-for-testing` の成果物（4.8MB）を actions/cache に保存。ヒット時は clone / ビルドをスキップして `test-without-building` で起動
   - 実測: dispatch → 操作可能まで、キャッシュミス約 4.8 分 / **ヒット約 2.8 分**（改善前は約 10 分）
   - ジョブは `down` で cancel されるため、post step ではなくビルド直後に明示保存する
+- [x] serve-sim 統合（完了: 2026-07-05）: `serve_sim` input（デフォルト true）で EvanBacon/serve-sim を起動し、ブラウザからライブ映像閲覧 + 双方向操作（タップ / スワイプ / キー入力）ができる preview UI を :3200 で tailnet に公開
+  - 検証: preview UI（HTTP 200）と `/helper/<UDID>/stream.mjpeg`（:3200 経由）からライブフレーム 40 枚取得を確認。操作 UI 自体はブラウザで対話的に使う（制御は `ws://.../helper/<UDID>/ws`）
+  - serve-sim は無認証 + shell-exec route を持つため bind は 127.0.0.1 のまま、到達経路を tailnet 内に限定（WDA と同じ原則）。この設計判断は「リポジトリ公開に耐える安全性」の範囲内
+  - `local/simtunnel preview <session>` でブラウザを開く（Host ヘッダから stream URL を組むため MagicDNS 名で開く）
 - [ ] simtunnel-agentd: runner 上の HTTP 受け口（tailnet 内限定）で simctl を遠隔実行
       （ローカルでビルドした .app を zip で転送 → install → launch のループを可能にする）
 - [ ] 1 runner 複数 Simulator（WDA を 8100+i / 9100+i で複数起動。Runner のメモリ制約を要検証）
