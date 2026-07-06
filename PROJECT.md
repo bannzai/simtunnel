@@ -319,3 +319,5 @@ env = { SIMTUNNEL_WDA_URL = "http://simtunnel-<session>:8100" }
 - **`down` 直後の同名セッション再起動**: ephemeral node が tailnet から消えるまで数十秒かかり、その間の `up <同名>` は冪等チェックに当たって何もしない。`simtunnel list` でノード消滅を確認してから `up` する
 - **同時実行上限**: Free プランは macOS 5 並列。worktree を跨いだ総セッション数の上限になる
 - **Runner スペック**: GitHub-hosted macOS (arm64) はメモリが小さめ。1 runner 複数 Simulator の成立性は要検証
+- **MagicDNS の伝播ラグ**: ephemeral node の tailnet 参加後、`simtunnel-<session>` の名前解決ができるまで数分かかることがある（実測 2026-07-06。IP 直なら即到達可能）。`.mcp.json` のホスト名接続が ready 直後に ENOTFOUND になったら少し待って再試行する
+- **keepalive 開始直後の WDA 無応答**: keepalive の死活チェックが開始 5 秒で失敗し run が failure 終了した事例を 1 回観測（2026-07-06。再現条件未特定。同日は runner が全体に遅く、サンプルアプリのビルドが通常 2 分 → 10 分超だった）。セッションが早期に消えたら run の failure step を確認し、再度 `up` する
