@@ -182,6 +182,49 @@ jobs:
 SIMTUNNEL_REPO=<owner>/<repo> local/simtunnel up <session> --wait
 ```
 
+#### ビルドに自由な step が必要なアプリ（Flutter 等）: build job 分割 + artifact 渡し
+
+`build_project` input（xcodebuild 直叩き）で表現できないビルド（Flutter の SDK セットアップ、ビルド前の secret 復元等）は、caller 側の **build job** で自由にビルドして Simulator 用 .app を artifact にアップロードし、session job へ `app_artifact` input で渡す。
+
+- secrets はネイティブに build job の step へ渡せる（reusable workflow に app 固有 secrets を通す必要がない）
+- artifact の転送は GitHub 内部で完結するため DERP 帯域の制約を受けない
+- 代償として runner 2 台が直列になり、起動待ちは「アプリのビルド時間 + セッション準備」になる
+- `upload-artifact` の `path` は **.app の親ディレクトリ**（例: `build/ios/iphonesimulator`）を指定する。.app そのものを指定すると中身が flatten されて .app として復元できない
+
+caller workflow の例（Flutter / bannzai/Pilll の場合の骨子）:
+
+```yaml
+jobs:
+  build:
+    runs-on: macos-26
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@<commit SHA> # v4.3.1
+      - run: make secret # アプリ固有のビルド前準備（secrets は build job にネイティブに渡す）
+        env:
+          FILE_FIREBASE_IOS: ${{ secrets.FILE_FIREBASE_IOS_DEVELOPMENT }}
+      - uses: subosito/flutter-action@<commit SHA> # v2.23.0
+        with:
+          flutter-version: '3.41.9'
+      - run: flutter pub get
+      - run: flutter build ios --simulator --debug --target lib/main.dev.dart
+      - uses: actions/upload-artifact@<commit SHA> # v5.0.0
+        with:
+          name: simulator-app
+          path: build/ios/iphonesimulator # .app の親ディレクトリ
+  session:
+    needs: build
+    uses: bannzai/simtunnel/.github/workflows/session.yml@<commit SHA> # main
+    with:
+      session: ${{ inputs.session }}
+      device: ${{ inputs.device }}
+      duration_minutes: ${{ inputs.duration_minutes }}
+      app_artifact: simulator-app
+    secrets:
+      TS_OIDC_CLIENT_ID: ${{ secrets.TS_OIDC_CLIENT_ID }}
+      TS_OIDC_AUDIENCE: ${{ secrets.TS_OIDC_AUDIENCE }}
+```
+
 ## Tailscale セットアップ手順（Phase 0 実施記録）
 
 管理コンソールでの操作。**順序厳守（ACL が先。「リポジトリ公開に耐える安全性」の 5 を参照）**。
@@ -228,6 +271,7 @@ simtunnel/
 ├── runner/                           # GHA 側スクリプト
 │   ├── boot-simulator.sh             # simctl boot + 起動待ち（複数ランタイム時は最新 iOS を優先）
 │   ├── install-app.sh                # app_zip_url の .app を install / launch（未指定ならスキップ）
+│   ├── install-artifact-app.sh       # app_artifact（caller build job の成果物）の .app を install / launch
 │   ├── build-app.sh                  # build_project / build_scheme を runner 上でビルドして install / launch
 │   ├── start-wda.sh                  # WDA を build-for-testing（キャッシュ対応）+ test-without-building で起動
 │   ├── start-serve-sim.sh            # serve-sim を起動（ブラウザ操作 UI + ライブ映像を :3200 で配信）
