@@ -30,6 +30,11 @@ on:
         type: string
         required: false
         default: ""
+      app_artifact:
+        description: "同一 run 内でアップロード済みの Simulator 用 .app が入った artifact 名（空なら install しない。caller の build job でビルドして渡す）"
+        type: string
+        required: false
+        default: ""
       build_project:
         description: "runner 上でビルドする .xcodeproj / .xcworkspace のパス（caller リポジトリのルート相対。空ならビルドしない）"
         type: string
@@ -137,6 +142,23 @@ jobs:
           APP_ZIP_URL: ${{ inputs.app_zip_url }}
           BUNDLE_ID: ${{ inputs.bundle_id }}
         run: ./simtunnel/runner/install-app.sh
+
+      # caller の build job がアップロードした .app（同一 run の artifact）を install する経路。
+      # runner 間の転送は GitHub 内部で完結するため DERP 帯域の制約を受けない
+      - name: artifact のアプリをダウンロード
+        if: inputs.app_artifact != ''
+        timeout-minutes: 10
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          name: ${{ inputs.app_artifact }}
+          path: artifact-app
+
+      - name: artifact のアプリを install / launch
+        if: inputs.app_artifact != ''
+        timeout-minutes: 10
+        env:
+          APP_DIR: artifact-app
+        run: ./simtunnel/runner/install-artifact-app.sh
 
       - name: アプリをビルドして install / launch
         if: inputs.build_project != ''
