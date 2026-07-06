@@ -198,11 +198,20 @@ worktree のプロジェクトルートに `.mcp.json` を置く:
 }
 ```
 
-生成ヘルパーで書き込む場合（既存 `.mcp.json` の simtunnel 以外のエントリは保持される）:
+生成ヘルパーで書き込む場合（既存 `.mcp.json` の対象サーバ名以外のエントリは保持される）:
 
 ```bash
-<simtunnel リポジトリの絶対パス>/local/simtunnel mcp-config <session> [worktree のパス]
+<simtunnel リポジトリの絶対パス>/local/simtunnel mcp-config <session> [worktree のパス] [--name mobile]
 ```
+
+### mobile-mcp 互換ツール
+
+simtunnel-mcp はネイティブツール（status / tap 等）に加えて、mobile-mcp と同名・同引数の互換ツール（`mobile_take_screenshot` / `mobile_click_on_screen_at_coordinates` 等）を提供する。`mcp-config <session> <worktree> --name mobile` でサーバ名を `mobile` にすると、ツールのフルネームが `mcp__mobile__mobile_*` になり、mobile-mcp 前提の既存 skill（verify-ui-mobile-mcp 等）がそのまま動く。
+
+- `device` 引数は受け取るが無視する（1 サーバ = 1 セッション）。`mobile_list_available_devices` は接続先セッション 1 台を返す
+- 座標はネイティブツールと同じポイント単位（mobile-mcp も iOS では WDA のポイント座標を使うため互換）
+- `mobile_launch_app` / `mobile_terminate_app` は WDA の apps API で対応。`mobile_list_apps` / `mobile_install_app` / `mobile_uninstall_app` は simctl が必要なため未対応（呼ぶと代替手段を案内するエラーを返す。install は workflow の `sample_app` / `app_zip_url` input で行う）
+- 本家 mobile-mcp を同じセッションに登録している場合はサーバ名 `mobile` が衝突するため、worktree では `--name mobile` はどちらか一方だけにする
 
 コマンドで登録する場合:
 
@@ -297,6 +306,7 @@ env = { SIMTUNNEL_WDA_URL = "http://simtunnel-<session>:8100" }
   - serve-sim は無認証 + shell-exec route を持つため bind は 127.0.0.1 のまま、到達経路を tailnet 内に限定（WDA と同じ原則）。この設計判断は「リポジトリ公開に耐える安全性」の範囲内
   - `local/simtunnel preview <session>` でブラウザを開く（Host ヘッダから stream URL を組むため MagicDNS 名で開く）
   - **ストリームは実質 1 クライアント占有**（実測）。別のブラウザ（agent-browser 含む）が掴んでいると「No simulator / connecting」のまま繋がらない。繋がらない時はまず他のクライアントを閉じる。「control socket connect timeout」が出た場合は Retry で復旧する
+- [x] mobile-mcp 互換ツール（完了: 2026-07-06）: `mcp__mobile__*` ツール名前提の既存 skill を simtunnel 経由で動かすための互換レイヤーを simtunnel-mcp に追加。詳細は「MCP の登録 > mobile-mcp 互換ツール」
 - [ ] simtunnel-agentd: runner 上の HTTP 受け口（tailnet 内限定）で simctl を遠隔実行
       （ローカルでビルドした .app を zip で転送 → install → launch のループを可能にする）
 - [ ] 1 runner 複数 Simulator（WDA を 8100+i / 9100+i で複数起動。Runner のメモリ制約を要検証）
