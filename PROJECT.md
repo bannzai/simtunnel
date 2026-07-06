@@ -289,6 +289,7 @@ env = { SIMTUNNEL_WDA_URL = "http://simtunnel-<session>:8100" }
   - 検証: preview UI（HTTP 200）と `/helper/<UDID>/stream.mjpeg`（:3200 経由）からライブフレーム 40 枚取得を確認。操作 UI 自体はブラウザで対話的に使う（制御は `ws://.../helper/<UDID>/ws`）
   - serve-sim は無認証 + shell-exec route を持つため bind は 127.0.0.1 のまま、到達経路を tailnet 内に限定（WDA と同じ原則）。この設計判断は「リポジトリ公開に耐える安全性」の範囲内
   - `local/simtunnel preview <session>` でブラウザを開く（Host ヘッダから stream URL を組むため MagicDNS 名で開く）
+  - **ストリームは実質 1 クライアント占有**（実測）。別のブラウザ（agent-browser 含む）が掴んでいると「No simulator / connecting」のまま繋がらない。繋がらない時はまず他のクライアントを閉じる。「control socket connect timeout」が出た場合は Retry で復旧する
 - [ ] simtunnel-agentd: runner 上の HTTP 受け口（tailnet 内限定）で simctl を遠隔実行
       （ローカルでビルドした .app を zip で転送 → install → launch のループを可能にする）
 - [ ] 1 runner 複数 Simulator（WDA を 8100+i / 9100+i で複数起動。Runner のメモリ制約を要検証）
