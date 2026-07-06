@@ -58,7 +58,8 @@ jobs:
     # 各 step が個別に時間制限を持つため、これは暴走時の最終防衛線
     timeout-minutes: 360
     steps:
-      - uses: actions/checkout@v4
+      # タグは可変で差し替えられうるため commit SHA で固定する（参照: PROJECT.md「リポジトリ公開に耐える安全性」）
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
 
       - name: セッション名を検証
         env:
@@ -75,7 +76,7 @@ jobs:
 
       - name: WDA ビルドキャッシュを復元
         id: wda-cache
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: wda-dd/Build/Products
           key: wda-${{ env.WDA_REF }}-${{ runner.arch }}-${{ steps.xcode.outputs.version }}
@@ -111,7 +112,7 @@ jobs:
       # post step 任せにせずビルド直後に明示的に保存する
       - name: WDA ビルドキャッシュを保存
         if: steps.wda-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: wda-dd/Build/Products
           key: wda-${{ env.WDA_REF }}-${{ runner.arch }}-${{ steps.xcode.outputs.version }}
@@ -119,7 +120,7 @@ jobs:
       # ここまで（WDA がローカルで応答するまで）tailnet に参加しない。
       # 参照: PROJECT.md「リポジトリ公開に耐える安全性」
       - name: Tailscale に参加
-        uses: tailscale/github-action@v4
+        uses: tailscale/github-action@306e68a486fd2350f2bfc3b19fcd143891a4a2d8 # v4.1.2
         with:
           oauth-client-id: ${{ secrets.TS_OIDC_CLIENT_ID }}
           audience: ${{ secrets.TS_OIDC_AUDIENCE }}
