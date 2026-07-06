@@ -425,7 +425,7 @@ env = { SIMTUNNEL_WDA_URL = "http://simtunnel-<session>:8100" }
 - [x] reusable workflow 化（完了: 2026-07-06）: `session.yml`（workflow_call）+ `simulator-session.yml`（dispatch ラッパー）に分割。ビルド対象を input 化（`build_project` / `build_scheme` / `build_configuration`）。runner スクリプトは `github.job_workflow_sha` で同一 commit を checkout。ローカル CLI は `SIMTUNNEL_REPO` / `SIMTUNNEL_WORKFLOW` で対象 repo を切り替え（詳細:「各アプリ repo での実行」）
 - [x] Tailscale trust credential の subject ワイルドカード検証（完了: 2026-07-06）: subject ワイルドカード（`repo:<owner>/*` 形式）の credential で、caller repo が異なる run（SimTunnelDemoProject）の認証が通ることを確認
 - [x] SwiftUI 実験 repo（bannzai/SimTunnelDemoProject）で実戦（完了: 2026-07-06）: caller workflow + Secrets をセットアップし、up → status 200 → mcp-config → mobile-mcp 互換ツールで tap / screenshot / HOME / launch_app → down の一連を確認（記録: SimTunnelDemoProject PR #1 のコメント）。`local/simtunnel` は `up` だけでなく `down` / `status` 等も `SIMTUNNEL_REPO` 指定が必要
-- [ ] Flutter (bannzai/Pilll) への展開。runner での Flutter ビルド方法（SDK セットアップ / build step の設計）は未決定
+- [x] Flutter (bannzai/Pilll) への展開（完了: 2026-07-06）: 「build job 分割 + artifact 渡し」方式で caller workflow を追加。build（`make secret` → flutter build --simulator）約 10 分 + セッション準備で、dispatch → 操作可能まで約 15 分。MCP 経由の tap（OS アラート / アプリ内ボタン → ボトムシート表示）とスクリーンショットを実 run で確認（記録: Pilll PR #1812 のコメント）。序盤 2 回の run は keepalive 早期終了（「未検証事項・リスク」参照）に当たり、keepalive 強化後の run で安定
 
 ## 未検証事項・リスク
 
