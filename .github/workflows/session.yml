@@ -180,6 +180,12 @@ jobs:
           BUILD_CONFIGURATION: ${{ inputs.build_configuration }}
         run: ./simtunnel/runner/build-app.sh
 
+      # caller リポジトリに .maestro/flows/simtunnel/setup.yml があれば実行する（存在チェックはスクリプト内。無ければスキップ）。
+      # maestro のドライバも WDA も XCUITest runner のため同時併用できない。WDA 起動前に直列で実行する
+      - name: Maestro flow を実行
+        timeout-minutes: 20
+        run: ./simtunnel/runner/run-maestro.sh
+
       - name: WebDriverAgent を起動
         timeout-minutes: 30
         run: ./simtunnel/runner/start-wda.sh $SIMULATOR_UDIDS
