@@ -230,6 +230,16 @@ jobs:
       TS_OIDC_AUDIENCE: ${{ secrets.TS_OIDC_AUDIENCE }}
 ```
 
+#### オンボーディング突破用 Maestro flow の自動実行
+
+多くのアプリは初回起動時にオンボーディングがあり、毎セッション MCP の tap で突破するのは非効率。定型の突破を Maestro flow に任せ、以降の探索的な操作を WDA / MCP で行う。
+
+- **runner 上で実行する**: maestro は WDA を使わず、自前の XCUITest ドライバを simctl で install する方式のため、ローカルから tailnet 越しの remote Simulator に対しては実行できない（公式 docs もローカル Xcode CLT 前提。https://docs.maestro.dev/get-started/supported-platform/ios.md ）
+- **自動検出（input なし）**: caller repo に `.maestro/flows/simtunnel/setup.yml` があれば実行、なければスキップ。無効化はファイルを消す / リネームする運用。既存 flow（例: `onboarding.yaml`）への **symlink** を張るのがテンプレ想定（git は symlink を保持する）
+- **実行順序はアプリ install / launch 後 → WDA 起動前**: maestro のドライバも WDA も XCUITest runner のため同時併用できない。直列に実行して干渉を避ける
+- **flow が失敗してもセッションは開く**: flow は補助であり、失敗してもセッション自体の価値は残る。失敗（maestro CLI のインストール失敗含む）は run summary に警告を出して WDA 起動へ進む
+- 実装は `runner/run-maestro.sh`（maestro CLI のインストール込み。caller repo の workspace ルートで実行される）
+
 ## Tailscale セットアップ手順（Phase 0 実施記録）
 
 管理コンソールでの操作。**順序厳守（ACL が先。「リポジトリ公開に耐える安全性」の 5 を参照）**。
@@ -278,6 +288,7 @@ simtunnel/
 │   ├── install-app.sh                # app_zip_url の .app を install / launch（未指定ならスキップ）
 │   ├── install-artifact-app.sh       # app_artifact（caller build job の成果物）の .app を install / launch
 │   ├── build-app.sh                  # build_project / build_scheme を runner 上でビルドして install / launch
+│   ├── run-maestro.sh                # caller repo の .maestro/flows/simtunnel/setup.yml を自動検出して実行（無ければスキップ）
 │   ├── start-wda.sh                  # WDA を build-for-testing（キャッシュ対応）+ test-without-building で起動
 │   ├── start-serve-sim.sh            # serve-sim を起動（ブラウザ操作 UI + ライブ映像を :3200 で配信）
 │   ├── bridge.sh                     # socat: tailscale IF → 指定ポート（直接到達可能ならスキップ）
@@ -425,6 +436,7 @@ env = { SIMTUNNEL_WDA_URL = "http://simtunnel-<session>:8100" }
 - [x] reusable workflow 化（完了: 2026-07-06）: `session.yml`（workflow_call）+ `simulator-session.yml`（dispatch ラッパー）に分割。ビルド対象を input 化（`build_project` / `build_scheme` / `build_configuration`）。runner スクリプトは `github.job_workflow_sha` で同一 commit を checkout。ローカル CLI は `SIMTUNNEL_REPO` / `SIMTUNNEL_WORKFLOW` で対象 repo を切り替え（詳細:「各アプリ repo での実行」）
 - [x] Tailscale trust credential の subject ワイルドカード検証（完了: 2026-07-06）: subject ワイルドカード（`repo:<owner>/*` 形式）の credential で、caller repo が異なる run（SimTunnelDemoProject）の認証が通ることを確認
 - [x] SwiftUI 実験 repo（bannzai/SimTunnelDemoProject）で実戦（完了: 2026-07-06）: caller workflow + Secrets をセットアップし、up → status 200 → mcp-config → mobile-mcp 互換ツールで tap / screenshot / HOME / launch_app → down の一連を確認（記録: SimTunnelDemoProject PR #1 のコメント）。`local/simtunnel` は `up` だけでなく `down` / `status` 等も `SIMTUNNEL_REPO` 指定が必要
+- [ ] Maestro flow の自動実行: caller repo の `.maestro/flows/simtunnel/setup.yml` を自動検出し、アプリ install / launch 後・WDA 起動前に runner 上で実行（設計:「オンボーディング突破用 Maestro flow の自動実行」）
 - [x] Flutter (bannzai/Pilll) への展開（完了: 2026-07-06）: 「build job 分割 + artifact 渡し」方式で caller workflow を追加。build（`make secret` → flutter build --simulator）約 10 分 + セッション準備で、dispatch → 操作可能まで約 15 分。MCP 経由の tap（OS アラート / アプリ内ボタン → ボトムシート表示）とスクリーンショットを実 run で確認（記録: Pilll PR #1812 のコメント）。序盤 2 回の run は keepalive 早期終了（「未検証事項・リスク」参照）に当たり、keepalive 強化後の run で安定
 
 ## 未検証事項・リスク
