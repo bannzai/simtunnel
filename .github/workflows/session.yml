@@ -15,6 +15,11 @@ on:
         type: string
         required: false
         default: iPhone 17
+      simulators:
+        description: "起動する Simulator の台数。i 台目 (0 始まり) は WDA :8100+i / MJPEG :9100+i（メモリ制約があるため 2〜3 台まで推奨）"
+        type: string
+        required: false
+        default: "1"
       duration_minutes:
         description: "セッション維持時間（分）"
         type: string
@@ -87,10 +92,15 @@ jobs:
           SESSION: ${{ inputs.session }}
           BUILD_PROJECT: ${{ inputs.build_project }}
           BUILD_SCHEME: ${{ inputs.build_scheme }}
+          SIMULATORS: ${{ inputs.simulators }}
           JOB_WORKFLOW_SHA: ${{ job.workflow_sha }}
         run: |
           [[ "$SESSION" =~ ^[a-z0-9-]+$ ]] || {
             echo "session は小文字英数字とハイフンのみ許可: $SESSION" >&2
+            exit 1
+          }
+          [[ "$SIMULATORS" =~ ^[0-9]+$ ]] && [ "$SIMULATORS" -ge 1 ] && [ "$SIMULATORS" -le 4 ] || {
+            echo "simulators は 1〜4 の整数: $SIMULATORS" >&2
             exit 1
           }
           if [ -n "$BUILD_PROJECT" ] && [ -z "$BUILD_SCHEME" ]; then
@@ -134,7 +144,8 @@ jobs:
         timeout-minutes: 15
         env:
           DEVICE: ${{ inputs.device }}
-        run: ./simtunnel/runner/boot-simulator.sh "$DEVICE"
+          SIMULATORS: ${{ inputs.simulators }}
+        run: ./simtunnel/runner/boot-simulator.sh "$DEVICE" "$SIMULATORS"
 
       - name: アプリを install / launch
         timeout-minutes: 10
@@ -170,8 +181,8 @@ jobs:
         run: ./simtunnel/runner/build-app.sh
 
       - name: WebDriverAgent を起動
-        timeout-minutes: 20
-        run: ./simtunnel/runner/start-wda.sh "$SIMULATOR_UDID"
+        timeout-minutes: 30
+        run: ./simtunnel/runner/start-wda.sh $SIMULATOR_UDIDS
 
       - name: serve-sim を起動
         if: inputs.serve_sim == 'true'
@@ -201,13 +212,18 @@ jobs:
       - name: tailnet へブリッジ
         timeout-minutes: 10
         env:
+          SIMULATORS: ${{ inputs.simulators }}
           EXTRA_PORTS: ${{ inputs.serve_sim == 'true' && '3200' || '' }}
-        run: ./simtunnel/runner/bridge.sh 8100 9100 $EXTRA_PORTS
+        run: |
+          PORTS=""
+          for i in $(seq 0 $((SIMULATORS - 1))); do PORTS="$PORTS $((8100 + i)) $((9100 + i))"; done
+          ./simtunnel/runner/bridge.sh $PORTS $EXTRA_PORTS
 
       - name: セッション情報を出力
         env:
           SESSION: ${{ inputs.session }}
           SERVE_SIM: ${{ inputs.serve_sim }}
+          SIMULATORS: ${{ inputs.simulators }}
         run: |
           TS_IP="$(tailscale ip -4 | head -1)"
           {
@@ -215,14 +231,19 @@ jobs:
             echo ""
             echo "- hostname: \`simtunnel-${SESSION}\`"
             echo "- tailscale IP: \`${TS_IP}\`"
-            echo "- WDA: http://simtunnel-${SESSION}:8100/status"
-            echo "- MJPEG: http://simtunnel-${SESSION}:9100"
+            for i in $(seq 0 $((SIMULATORS - 1))); do
+              echo "- sim ${i}: WDA http://simtunnel-${SESSION}:$((8100 + i))/status / MJPEG http://simtunnel-${SESSION}:$((9100 + i))"
+            done
             if [ "$SERVE_SIM" = "true" ]; then
-              echo "- preview UI（ブラウザ操作）: http://simtunnel-${SESSION}:3200"
+              echo "- preview UI（ブラウザ操作 / sim 0）: http://simtunnel-${SESSION}:3200"
             fi
           } | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: セッションを維持
         env:
           DURATION: ${{ inputs.duration_minutes }}
-        run: ./simtunnel/runner/keepalive.sh "$DURATION"
+          SIMULATORS: ${{ inputs.simulators }}
+        run: |
+          PORTS=""
+          for i in $(seq 0 $((SIMULATORS - 1))); do PORTS="$PORTS $((8100 + i))"; done
+          ./simtunnel/runner/keepalive.sh "$DURATION" $PORTS

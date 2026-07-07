@@ -2,13 +2,15 @@
 # SimTunnel ローカル CLI。GHA 上の iOS Simulator セッションを管理する。
 #
 # 使い方:
-#   simtunnel up <session> [--device "iPhone 16"] [--duration 60] [--ref <branch>] [--app-zip-url <url>] [--bundle-id <id>] [--wait]
+#   simtunnel up <session> [--device "iPhone 16"] [--duration 60] [--simulators 2] [--ref <branch>] [--app-zip-url <url>] [--bundle-id <id>] [--wait]
 #   simtunnel down <session>
 #   simtunnel list
-#   simtunnel status <session>
-#   simtunnel screenshot <session> [出力パス]
-#   simtunnel preview <session>   # ブラウザで preview UI（見る + 操作）を開く
-#   simtunnel mcp-config <session> [ディレクトリ] [--name mobile]   # ディレクトリ直下の .mcp.json に simtunnel MCP 設定を書き込む
+#   simtunnel status <session> [--slot 1]
+#   simtunnel screenshot <session> [出力パス] [--slot 1]
+#   simtunnel preview <session>   # ブラウザで preview UI（見る + 操作 / sim 0 のみ）を開く
+#   simtunnel mcp-config <session> [ディレクトリ] [--name mobile] [--slot 1]   # ディレクトリ直下の .mcp.json に simtunnel MCP 設定を書き込む
+#
+# --slot は複数 Simulator セッション（up --simulators N）の i 台目 (0 始まり) を指す。WDA :8100+i / MJPEG :9100+i
 #
 # 対象リポジトリの切り替え（各アプリ repo の caller workflow を叩く場合）:
 #   SIMTUNNEL_REPO=<owner>/<repo> [SIMTUNNEL_WORKFLOW=simulator-session.yml] simtunnel up <session>
@@ -41,11 +43,12 @@ session_run_ids() {
 
 cmd_up() {
   local session=$1; shift
-  local device="iPhone 17" duration=60 ref="" app_zip_url="" bundle_id="" wait=0
+  local device="iPhone 17" duration=60 simulators="" ref="" app_zip_url="" bundle_id="" wait=0
   while [ $# -gt 0 ]; do
     case "$1" in
       --device) device=$2; shift 2 ;;
       --duration) duration=$2; shift 2 ;;
+      --simulators) simulators=$2; shift 2 ;;
       --ref) ref=$2; shift 2 ;;
       --app-zip-url) app_zip_url=$2; shift 2 ;;
       --bundle-id) bundle_id=$2; shift 2 ;;
@@ -64,8 +67,9 @@ cmd_up() {
   fi
 
   # workflow 側で未定義の input を送ると dispatch 自体が拒否されるため、
-  # 空の任意 input は送らない（app_zip_url / bundle_id を宣言しない薄い caller workflow に対応）
+  # 空の任意 input は送らない（app_zip_url 等を宣言しない薄い caller workflow に対応）
   local -a inputs=(-f session="$session" -f device="$device" -f duration_minutes="$duration")
+  if [ -n "$simulators" ]; then inputs+=(-f simulators="$simulators"); fi
   if [ -n "$app_zip_url" ]; then inputs+=(-f app_zip_url="$app_zip_url"); fi
   if [ -n "$bundle_id" ]; then inputs+=(-f bundle_id="$bundle_id"); fi
   gh workflow run "$WORKFLOW" -R "$REPO" ${ref:+--ref "$ref"} "${inputs[@]}"
@@ -119,21 +123,35 @@ cmd_list() {
 }
 
 cmd_status() {
-  local session=$1
+  local session=$1; shift
+  local slot=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --slot) slot=$2; shift 2 ;;
+      *) echo "不明なオプション: $1" >&2; return 1 ;;
+    esac
+  done
   local ip
   ip=$(session_ip "$session")
   if [ -z "$ip" ]; then
     echo "simtunnel-${session} は tailnet に存在しない（未起動 or 準備中）" >&2
     return 1
   fi
-  curl -s -m 10 -w "\nHTTP %{http_code} / %{time_total}s\n" "http://${ip}:8100/status"
+  curl -s -m 10 -w "\nHTTP %{http_code} / %{time_total}s\n" "http://${ip}:$((8100 + slot))/status"
 }
 
 # MJPEG (:9100) から最新の完全なフレームを 1 枚抽出する。
 # GET /screenshot (PNG) は DERP relay 経由だと 1 分超かかるため使わない（PROJECT.md「Phase 1 実測」参照）
 cmd_screenshot() {
-  local session=$1
-  local out=${2:-"./tmp/simtunnel-${session}-$(date +%H%M%S).jpg"}
+  local session=$1; shift
+  local out="" slot=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --slot) slot=$2; shift 2 ;;
+      *) out=$1; shift ;;
+    esac
+  done
+  [ -n "$out" ] || out="./tmp/simtunnel-${session}-$(date +%H%M%S).jpg"
   local ip
   ip=$(session_ip "$session")
   [ -n "$ip" ] || { echo "simtunnel-${session} は tailnet に存在しない" >&2; return 1; }
@@ -142,7 +160,7 @@ cmd_screenshot() {
   local raw
   raw=$(mktemp)
   # DERP 経由 (約 60KB/s) で 1 フレーム約 110KB のため、15 秒あれば複数フレーム集まる
-  curl -s -m 15 "http://${ip}:9100" -o "$raw" || true
+  curl -s -m 15 "http://${ip}:$((9100 + slot))" -o "$raw" || true
 
   RAW="$raw" OUT="$out" python3 - <<'EOF'
 import os, sys
@@ -164,10 +182,11 @@ EOF
 cmd_mcp_config() {
   local session=$1
   shift
-  local dir="." name="simtunnel"
+  local dir="." name="simtunnel" slot=0
   while [ $# -gt 0 ]; do
     case "$1" in
       --name) name=$2; shift 2 ;;
+      --slot) slot=$2; shift 2 ;;
       *) dir=$1; shift ;;
     esac
   done
@@ -181,14 +200,15 @@ cmd_mcp_config() {
   if [ -f "$file" ]; then
     existing=$(jq . "$file") || { echo "既存の ${file} が JSON として不正。手で直してから再実行して" >&2; return 1; }
   fi
+  local wda_url="http://simtunnel-${session}:$((8100 + slot))"
   merged=$(jq -n \
     --argjson existing "$existing" \
     --arg name "$name" \
     --arg mjs "${repo_root}/mcp/index.mjs" \
-    --arg url "http://simtunnel-${session}:8100" \
+    --arg url "$wda_url" \
     '$existing * {mcpServers: {($name): {command: "node", args: [$mjs], env: {SIMTUNNEL_WDA_URL: $url}}}}')
   printf '%s\n' "$merged" > "$file"
-  echo "wrote: ${file} (server=${name}, SIMTUNNEL_WDA_URL=http://simtunnel-${session}:8100)"
+  echo "wrote: ${file} (server=${name}, SIMTUNNEL_WDA_URL=${wda_url})"
 }
 
 # serve-sim の preview UI をブラウザで開く。

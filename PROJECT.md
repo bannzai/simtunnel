@@ -30,9 +30,10 @@ GitHub Actions (workflow_dispatch)
 └─ Job (session=b2): 同上
 ```
 
-- **1 ジョブ = 1 Runner = 1 Simulator = 1 tailnet ホスト名** を基本単位とする
+- **1 ジョブ = 1 Runner = 1 tailnet ホスト名** を基本単位とする（既定は Simulator 1 台）
 - セッション名（例: `a1`, `focus-widget-1`）は `workflow_dispatch` の input で渡し、Tailscale の hostname `simtunnel-<session>` になる。ローカルからの接続先は毎回固定の名前で解決できる
 - N 個の Simulator が欲しければ N ジョブ起動する。worktree とセッションの対応はローカル側の運用（CLI / .mcp.json）で管理し、GHA 側は関知しない
+- `simulators` input で **1 runner に複数 Simulator** も載せられる。i 台目（0 始まり・2 台目以降はデバイスの clone）の WDA が `:8100+i` / MJPEG が `:9100+i` になり、CLI / mcp-config は `--slot <i>` で台を指定する（serve-sim は sim 0 のみ）。並列上限 5 runner を超えて Simulator を増やしたい時の手段だが、runner のメモリが小さいため 2〜3 台まで（「未検証事項・リスク」参照）
 
 ## 実現可能性の調査結果（2026-07-05 時点）
 
@@ -419,7 +420,7 @@ env = { SIMTUNNEL_WDA_URL = "http://simtunnel-<session>:8100" }
 - [ ] simtunnel-agentd: runner 上の HTTP 受け口（tailnet 内限定）で simctl を遠隔実行
       （ローカルでビルドした .app を zip で転送 → install → launch のループを可能にする。
       per-repo 展開によりアプリは各 repo の runner でビルドするため優先度は下がった）
-- [ ] 1 runner 複数 Simulator（WDA を 8100+i / 9100+i で複数起動。Runner のメモリ制約を要検証）
+- [x] 1 runner 複数 Simulator（完了: 2026-07-07）: `simulators` input で台数指定。2 台目以降はデバイスの clone を boot し、i 台目の WDA に per-sim の xctestrun コピーで `USE_PORT=8100+i` / `MJPEG_SERVER_PORT=9100+i` を注入する。CLI / mcp-config は `--slot` で台を指定。simulators=2 の実 run で両ポート HTTP 200・サンプルアプリ両台 install・slot 1 のみ tap して独立性をスクリーンショットで確認。ハマり: xctestrun のコピーは `__TESTROOT__` 相対で成果物を参照するため、元と同じディレクトリに置く必要がある。3 台以上のメモリ成立性は未検証
 
 ### Phase 5: 各アプリ repo への展開
 - [x] reusable workflow 化（完了: 2026-07-06）: `session.yml`（workflow_call）+ `simulator-session.yml`（dispatch ラッパー）に分割。ビルド対象を input 化（`build_project` / `build_scheme` / `build_configuration`）。runner スクリプトは `github.job_workflow_sha` で同一 commit を checkout。ローカル CLI は `SIMTUNNEL_REPO` / `SIMTUNNEL_WORKFLOW` で対象 repo を切り替え（詳細:「各アプリ repo での実行」）
@@ -435,6 +436,6 @@ env = { SIMTUNNEL_WDA_URL = "http://simtunnel-<session>:8100" }
 - **`down` 直後の同名セッション再起動**: 実測（2026-07-07）では ephemeral node は cancel 送信の約 20 秒後に tailnet から消えた。ただし再 up を実際にブロックするのは run のキャンセル完了待ちで、cancel 送信後もしばらく（数十秒〜1 分程度）GitHub API 上は run が in_progress のままのため、`up <同名>` は「run はすでに起動中」の冪等チェックに当たって何もしない。`simtunnel list` で run が completed になったのを確認してから `up` する
 - **同時実行上限**: Free プランは macOS 5 並列。worktree を跨いだ総セッション数の上限になる。実測済み（2026-07-07: repo 横断で 5 job が in_progress の状態で追加 dispatch した job は queued のまま待機し、スロットが空くと自動で開始した。上限はセッション用 workflow に限らず、同一アカウントの全 macOS job（他 workflow の run 含む）で共有される）
 - **repo を跨いだ同名セッション**: 同時起動防止の concurrency group は repo 単位のため、別 repo で同名セッションを起動すると tailnet ホスト名 `simtunnel-<session>` が衝突する。実測（2026-07-07）では後から join したノードに `-1` が付き（`simtunnel-<session>-1`）、`simtunnel-<session>` の名前解決は先着ノードを指し続けるため、**CLI は別 repo の先着セッションに黙って接続する**（エラーにならないのが危険）。repo ごとに接頭辞を変える等、セッション名の一意性は運用で担保する
-- **Runner スペック**: GitHub-hosted macOS (arm64) はメモリが小さめ。1 runner 複数 Simulator の成立性は要検証
-- **MagicDNS の伝播ラグ**: ephemeral node の tailnet 参加後、`simtunnel-<session>` の名前解決ができるまで数分かかることがある（実測 2026-07-06。IP 直なら即到達可能）。`.mcp.json` のホスト名接続が ready 直後に ENOTFOUND になったら少し待って再試行する
+- **Runner スペック**: GitHub-hosted macOS (arm64) はメモリが小さめ。1 runner 複数 Simulator は 2 台（サンプルアプリ + serve-sim なし）で成立を実測済み（Phase 4）。3 台以上や重いアプリでの成立性は要検証
+- **MagicDNS の伝播ラグ**: ephemeral node の tailnet 参加後、`simtunnel-<session>` の名前解決ができるまで数分かかることがある（実測 2026-07-06。IP 直なら即到達可能）。`.mcp.json` のホスト名接続が ready 直後に ENOTFOUND になったら少し待って再試行する。OS の resolver（dscacheutil）は解決できているのに Node の fetch だけ失敗が続く事例も観測した（2026-07-07）。急ぐ場合は `SIMTUNNEL_WDA_URL` を IP 直（`tailscale status` で取得）にすれば確実に繋がる
 - **keepalive 中の WDA 無応答**: keepalive の死活チェックが失敗し run が failure 終了する事象を計 3 回観測（2026-07-06: simtunnel 本体で開始 5 秒後 x1、Pilll で開始 約5 分後 / 35 秒後 x2）。重いアプリ（Flutter + Firebase の Pilll）のセッションで発生率が高く、runner のメモリ圧が疑わしい（GitHub-hosted macOS runner は RAM が小さい）。対策として keepalive は連続 4 回失敗した時だけ終了し、終了時に wda.log 末尾を出力する。**対策の効果を実測済み**（2026-07-06: Pilll + serve-sim 有効のセッションで開始 25 秒後に無応答 1 回 → 回復 → ブラウザ preview 利用込みで 60 分完走。無応答は一時的なストールで、連続失敗しきい値で吸収できる）。セッションが早期に消えたら run の failure step と wda.log を確認し、再度 `up` する。切り分け用に caller で `serve_sim: "false"` にしてメモリ消費を減らす手もある
