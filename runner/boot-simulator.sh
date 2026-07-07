@@ -25,15 +25,23 @@ if [ -z "$BASE_UDID" ]; then
 fi
 
 UDIDS=("$BASE_UDID")
-for i in $(seq 2 "$COUNT"); do
-  CLONE_NAME="${DEVICE_NAME} simtunnel-${i}"
-  CLONE_UDID=$(find_device "$CLONE_NAME")
-  if [ -z "$CLONE_UDID" ]; then
-    CLONE_UDID=$(xcrun simctl clone "$BASE_UDID" "$CLONE_NAME")
-    echo "cloned: ${CLONE_NAME} (${CLONE_UDID})"
-  fi
-  UDIDS+=("$CLONE_UDID")
-done
+# BSD seq は `seq 2 1` が逆順（2 1）を返すため、COUNT=1 ではループ自体を実行しない
+if [ "$COUNT" -ge 2 ]; then
+  for i in $(seq 2 "$COUNT"); do
+    CLONE_NAME="${DEVICE_NAME} simtunnel-${i}"
+    CLONE_UDID=$(find_device "$CLONE_NAME")
+    if [ -z "$CLONE_UDID" ]; then
+      CLONE_UDID=$(xcrun simctl clone "$BASE_UDID" "$CLONE_NAME")
+      echo "cloned: ${CLONE_NAME} (${CLONE_UDID})"
+    fi
+    UDIDS+=("$CLONE_UDID")
+  done
+fi
+
+[ "${#UDIDS[@]}" -eq "$COUNT" ] || {
+  echo "起動対象の台数が simulators=${COUNT} と一致しない: ${UDIDS[*]}" >&2
+  exit 1
+}
 
 for u in "${UDIDS[@]}"; do
   echo "boot: ${u}"
