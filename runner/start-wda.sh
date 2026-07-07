@@ -64,8 +64,10 @@ for i in "${!UDIDS[@]}"; do
     continue
   fi
 
-  # ポートは per-sim の xctestrun コピーに環境変数として注入する（xcodebuild のプロセス env も併せて渡す）
-  RUN_FILE="${WORK}/wda-${PORT}.xctestrun"
+  # ポートは per-sim の xctestrun コピーに環境変数として注入する（xcodebuild のプロセス env も併せて渡す）。
+  # xctestrun 内の成果物パスは __TESTROOT__（= xctestrun のあるディレクトリ）相対のため、
+  # コピーは元と同じディレクトリに置く（find_xctestrun のパターンに掛からない名前にする）
+  RUN_FILE="${PRODUCTS}/wda-port-${PORT}.xctestrun"
   cp "$XCTESTRUN" "$RUN_FILE"
   plist_set "$RUN_FILE" "${TARGET_KEY}:TestingEnvironmentVariables:USE_PORT" "$PORT"
   plist_set "$RUN_FILE" "${TARGET_KEY}:TestingEnvironmentVariables:MJPEG_SERVER_PORT" "$MJPEG_PORT"
