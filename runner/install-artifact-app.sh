@@ -37,7 +37,9 @@ find "$APP_PATH" -name Info.plist -print0 | while IFS= read -r -d '' plist; do
   if [ -f "${dir}/${exe}" ]; then chmod +x "${dir}/${exe}"; fi
 done
 
-xcrun simctl install "$UDID" "$APP_PATH"
-echo "installed: ${APP_PATH} (${BUNDLE_ID})"
-xcrun simctl launch "$UDID" "$BUNDLE_ID"
-echo "launched: ${BUNDLE_ID}"
+for u in ${SIMULATOR_UDIDS:-$UDID}; do
+  xcrun simctl install "$u" "$APP_PATH"
+  echo "installed: ${APP_PATH} (${BUNDLE_ID}) -> ${u}"
+  xcrun simctl launch "$u" "$BUNDLE_ID"
+  echo "launched: ${BUNDLE_ID} -> ${u}"
+done

@@ -33,7 +33,9 @@ APP_PATH=$(find "${DD}/Build/Products/${CONFIGURATION}-iphonesimulator" -maxdept
 [ -n "$APP_PATH" ] || { echo "ビルド後に .app が見つからない" >&2; exit 1; }
 BUNDLE_ID=$(/usr/libexec/PlistBuddy -c 'Print CFBundleIdentifier' "${APP_PATH}/Info.plist")
 
-xcrun simctl install "$UDID" "$APP_PATH"
-echo "installed: ${APP_PATH} (${BUNDLE_ID})"
-xcrun simctl launch "$UDID" "$BUNDLE_ID"
-echo "launched: ${BUNDLE_ID}"
+for u in ${SIMULATOR_UDIDS:-$UDID}; do
+  xcrun simctl install "$u" "$APP_PATH"
+  echo "installed: ${APP_PATH} (${BUNDLE_ID}) -> ${u}"
+  xcrun simctl launch "$u" "$BUNDLE_ID"
+  echo "launched: ${BUNDLE_ID} -> ${u}"
+done

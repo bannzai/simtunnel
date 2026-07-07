@@ -22,6 +22,10 @@ on:
         description: "セッション維持時間（分）"
         required: true
         default: "60"
+      simulators:
+        description: "起動する Simulator の台数（i 台目は WDA :8100+i / MJPEG :9100+i）"
+        required: false
+        default: "1"
       app_zip_url:
         description: "Simulator 用 .app を zip した URL（省略時は install しない）"
         required: false
@@ -50,6 +54,7 @@ jobs:
       session: ${{ inputs.session }}
       device: ${{ inputs.device }}
       duration_minutes: ${{ inputs.duration_minutes }}
+      simulators: ${{ inputs.simulators }}
       app_zip_url: ${{ inputs.app_zip_url }}
       bundle_id: ${{ inputs.bundle_id }}
       build_project: ${{ inputs.sample_app == 'true' && 'iOSProject/iOSProject.xcodeproj' || '' }}

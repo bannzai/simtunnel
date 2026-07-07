@@ -30,9 +30,10 @@ GitHub Actions (workflow_dispatch)
 └─ Job (session=b2): 同上
 ```
 
-- **1 ジョブ = 1 Runner = 1 Simulator = 1 tailnet ホスト名** を基本単位とする
+- **1 ジョブ = 1 Runner = 1 tailnet ホスト名** を基本単位とする（既定は Simulator 1 台）
 - セッション名（例: `a1`, `focus-widget-1`）は `workflow_dispatch` の input で渡し、Tailscale の hostname `simtunnel-<session>` になる。ローカルからの接続先は毎回固定の名前で解決できる
 - N 個の Simulator が欲しければ N ジョブ起動する。worktree とセッションの対応はローカル側の運用（CLI / .mcp.json）で管理し、GHA 側は関知しない
+- `simulators` input で **1 runner に複数 Simulator** も載せられる。i 台目（0 始まり・2 台目以降はデバイスの clone）の WDA が `:8100+i` / MJPEG が `:9100+i` になり、CLI / mcp-config は `--slot <i>` で台を指定する（serve-sim は sim 0 のみ）。並列上限 5 runner を超えて Simulator を増やしたい時の手段だが、runner のメモリが小さいため 2〜3 台まで（「未検証事項・リスク」参照）
 
 ## 実現可能性の調査結果（2026-07-05 時点）
 

@@ -19,7 +19,9 @@ const MJPEG_URL =
   process.env.SIMTUNNEL_MJPEG_URL ??
   (() => {
     const url = new URL(WDA_URL);
-    url.port = "9100";
+    // 複数 Simulator セッションでは WDA :8100+i に対して MJPEG が :9100+i になる
+    const wdaPort = Number(url.port || "80");
+    url.port = String(wdaPort >= 8100 && wdaPort < 8200 ? wdaPort + 1000 : 9100);
     url.pathname = "/";
     return url.toString();
   })();
