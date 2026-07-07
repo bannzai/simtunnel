@@ -432,9 +432,9 @@ env = { SIMTUNNEL_WDA_URL = "http://simtunnel-<session>:8100" }
 - ~~WDA の bind interface~~: **解決済み（Phase 1 実測）**。Simulator 上の WDA は 8100/9100 を全インターフェースで listen し、bridge は不要だった。挙動が変わった時の保険として bridge.sh は残す（到達可能なら何もしない）
 - **転送帯域**: GHA runner ↔ ローカル間は direct 接続が確立せず DERP relay 経由（Phase 1 実測）。制御系 API（tap / 入力 / status）は 0.5〜2 秒で実用範囲だが、大きなレスポンスの転送は遅い。スクリーンショットは MJPEG フレーム抽出で回避。`.app` 転送（Phase 4）はこの帯域がボトルネックになる可能性が高い
 - ~~WDA 起動時間~~: **解決済み（Phase 4）**。ビルドキャッシュ導入で dispatch → 操作可能は約 2.8 分（キャッシュヒット時）
-- **`down` 直後の同名セッション再起動**: ephemeral node が tailnet から消えるまで数十秒かかり、その間の `up <同名>` は冪等チェックに当たって何もしない。`simtunnel list` でノード消滅を確認してから `up` する
-- **同時実行上限**: Free プランは macOS 5 並列。worktree を跨いだ総セッション数の上限になる
-- **repo を跨いだ同名セッション**: 同時起動防止の concurrency group は repo 単位のため、別 repo で同名セッションを起動すると tailnet ホスト名 `simtunnel-<session>` が衝突する。repo ごとに接頭辞を変える等、セッション名の一意性は運用で担保する
+- **`down` 直後の同名セッション再起動**: 実測（2026-07-07）では ephemeral node は cancel 送信の約 20 秒後に tailnet から消えた。ただし再 up を実際にブロックするのは run のキャンセル完了待ちで、cancel 送信後もしばらく（数十秒〜1 分程度）GitHub API 上は run が in_progress のままのため、`up <同名>` は「run はすでに起動中」の冪等チェックに当たって何もしない。`simtunnel list` で run が completed になったのを確認してから `up` する
+- **同時実行上限**: Free プランは macOS 5 並列。worktree を跨いだ総セッション数の上限になる。実測済み（2026-07-07: repo 横断で 5 job が in_progress の状態で追加 dispatch した job は queued のまま待機し、スロットが空くと自動で開始した。上限はセッション用 workflow に限らず、同一アカウントの全 macOS job（他 workflow の run 含む）で共有される）
+- **repo を跨いだ同名セッション**: 同時起動防止の concurrency group は repo 単位のため、別 repo で同名セッションを起動すると tailnet ホスト名 `simtunnel-<session>` が衝突する。実測（2026-07-07）では後から join したノードに `-1` が付き（`simtunnel-<session>-1`）、`simtunnel-<session>` の名前解決は先着ノードを指し続けるため、**CLI は別 repo の先着セッションに黙って接続する**（エラーにならないのが危険）。repo ごとに接頭辞を変える等、セッション名の一意性は運用で担保する
 - **Runner スペック**: GitHub-hosted macOS (arm64) はメモリが小さめ。1 runner 複数 Simulator の成立性は要検証
 - **MagicDNS の伝播ラグ**: ephemeral node の tailnet 参加後、`simtunnel-<session>` の名前解決ができるまで数分かかることがある（実測 2026-07-06。IP 直なら即到達可能）。`.mcp.json` のホスト名接続が ready 直後に ENOTFOUND になったら少し待って再試行する
 - **keepalive 中の WDA 無応答**: keepalive の死活チェックが失敗し run が failure 終了する事象を計 3 回観測（2026-07-06: simtunnel 本体で開始 5 秒後 x1、Pilll で開始 約5 分後 / 35 秒後 x2）。重いアプリ（Flutter + Firebase の Pilll）のセッションで発生率が高く、runner のメモリ圧が疑わしい（GitHub-hosted macOS runner は RAM が小さい）。対策として keepalive は連続 4 回失敗した時だけ終了し、終了時に wda.log 末尾を出力する。**対策の効果を実測済み**（2026-07-06: Pilll + serve-sim 有効のセッションで開始 25 秒後に無応答 1 回 → 回復 → ブラウザ preview 利用込みで 60 分完走。無応答は一時的なストールで、連続失敗しきい値で吸収できる）。セッションが早期に消えたら run の failure step と wda.log を確認し、再度 `up` する。切り分け用に caller で `serve_sim: "false"` にしてメモリ消費を減らす手もある
