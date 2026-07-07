@@ -235,7 +235,8 @@ jobs:
 多くのアプリは初回起動時にオンボーディングがあり、毎セッション MCP の tap で突破するのは非効率。定型の突破を Maestro flow に任せ、以降の探索的な操作を WDA / MCP で行う。
 
 - **runner 上で実行する**: maestro は WDA を使わず、自前の XCUITest ドライバを simctl で install する方式のため、ローカルから tailnet 越しの remote Simulator に対しては実行できない（公式 docs もローカル Xcode CLT 前提。https://docs.maestro.dev/get-started/supported-platform/ios.md ）
-- **自動検出（input なし）**: caller repo に `.maestro/flows/simtunnel/setup.yml` があれば実行、なければスキップ。無効化はファイルを消す / リネームする運用。既存 flow（例: `onboarding.yaml`）への **symlink** を張るのがテンプレ想定（git は symlink を保持する）
+- **自動検出（input なし）**: caller repo に `.maestro/flows/simtunnel/setup.yml` があれば実行、なければスキップ。無効化はファイルを消す / リネームする運用。既存 flow をそのまま使えるなら **symlink**（git は symlink を保持する）、launch 条件の制御が要るなら `launchApp` + `runFlow` で既存 flow を包む**薄いラッパー flow** を置く
+- **システムダイアログの文言分岐は permissions 事前許可で回避する**: runner の Simulator は英語ロケールのため、`tapOn: "許可"` のような日本語文言の条件タップは通らない（実測: 通知許可ダイアログが "Allow" で表示され flow が失敗）。setup.yml 側で `launchApp` の `permissions`（例: `notifications: allow`）を使いダイアログ自体を出さない
 - **実行順序はアプリ install / launch 後 → WDA 起動前**: maestro のドライバも WDA も XCUITest runner のため同時併用できない。直列に実行して干渉を避ける
 - **flow が失敗してもセッションは開く**: flow は補助であり、失敗してもセッション自体の価値は残る。失敗（maestro CLI のインストール失敗含む）は run summary に警告を出して WDA 起動へ進む
 - 実装は `runner/run-maestro.sh`（maestro CLI のインストール込み。caller repo の workspace ルートで実行される）

@@ -32,6 +32,7 @@ for v in 21 17; do
 done
 java -version
 
+export MAESTRO_CLI_NO_ANALYTICS=1
 if ! curl -fsSL "https://get.maestro.mobile.dev" | bash; then
   warn "maestro CLI のインストールに失敗した。flow（\`${FLOW}\`）を実行せずセッションを開く。"
   exit 0
