@@ -1,12 +1,13 @@
 #!/bin/bash
 # EvanBacon/serve-sim を起動し、preview UI (:3200) が listen するまで待つ。
-# preview UI はブラウザからの双方向操作 (タップ/スワイプ/キー入力等) と
-# ライブ映像 (/helper/<UDID>/stream.mjpeg) をどちらも :3200 で提供する。
+# 複数 UDID を渡すと 1 プロセスで全 Simulator を配信する（デバイス切り替えは
+# preview UI のサイドバーまたは /?device=<UDID>。ストリームは /helper/<UDID>/stream.mjpeg）。
+# preview UI はブラウザからの双方向操作 (タップ/スワイプ/キー入力等) とライブ映像を :3200 で提供する。
 # bind は 127.0.0.1 のまま（serve-sim は無認証 + shell-exec route を持つため）。
 # tailnet への公開は bridge.sh 側で行う。
 set -euo pipefail
 
-UDID="${1:?usage: start-serve-sim.sh <simulator-udid>}"
+[ $# -ge 1 ] || { echo "usage: start-serve-sim.sh <simulator-udid>..." >&2; exit 1; }
 WORK="${RUNNER_TEMP:-$(pwd)/tmp}"
 LOG="${WORK}/serve-sim.log"
 
@@ -20,7 +21,7 @@ if port_open 3200; then
   exit 0
 fi
 
-nohup npx --yes serve-sim --host 127.0.0.1 "$UDID" >"$LOG" 2>&1 &
+nohup npx --yes serve-sim --host 127.0.0.1 "$@" >"$LOG" 2>&1 &
 
 echo "serve-sim の起動を待機中（最大 5 分）..."
 for _ in $(seq 1 60); do

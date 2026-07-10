@@ -56,7 +56,7 @@ on:
         required: false
         default: Debug
       serve_sim:
-        description: "serve-sim を起動する（ブラウザから見る・操作する preview UI :3200 / stream :3100）"
+        description: "serve-sim を起動する（全 Simulator をブラウザから見る・操作する preview UI :3200）"
         type: string
         required: false
         default: "true"
@@ -190,10 +190,11 @@ jobs:
         timeout-minutes: 30
         run: ./simtunnel/runner/start-wda.sh $SIMULATOR_UDIDS
 
+      # 全 Simulator の UDID を渡し、1 プロセスで全台を配信する（多重起動しないためメモリ増を抑えられる）
       - name: serve-sim を起動
         if: inputs.serve_sim == 'true'
         timeout-minutes: 10
-        run: ./simtunnel/runner/start-serve-sim.sh "$SIMULATOR_UDID"
+        run: ./simtunnel/runner/start-serve-sim.sh $SIMULATOR_UDIDS
 
       # キャッシュミス時のみ保存する。ジョブは down で cancel されるため、
       # post step 任せにせずビルド直後に明示的に保存する
@@ -241,7 +242,13 @@ jobs:
               echo "- sim ${i}: WDA http://simtunnel-${SESSION}:$((8100 + i))/status / MJPEG http://simtunnel-${SESSION}:$((9100 + i))"
             done
             if [ "$SERVE_SIM" = "true" ]; then
-              echo "- preview UI（ブラウザ操作 / sim 0）: http://simtunnel-${SESSION}:3200"
+              echo "- preview UI（ブラウザ操作）: http://simtunnel-${SESSION}:3200"
+              if [ "$SIMULATORS" -gt 1 ]; then
+                UDIDS=($SIMULATOR_UDIDS)
+                for i in $(seq 0 $((SIMULATORS - 1))); do
+                  echo "  - sim ${i}: http://simtunnel-${SESSION}:3200/?device=${UDIDS[$i]}"
+                done
+              fi
             fi
           } | tee -a "$GITHUB_STEP_SUMMARY"
 

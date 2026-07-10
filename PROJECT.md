@@ -33,7 +33,7 @@ GitHub Actions (workflow_dispatch)
 - **1 ジョブ = 1 Runner = 1 tailnet ホスト名** を基本単位とする（既定は Simulator 1 台）
 - セッション名（例: `a1`, `focus-widget-1`）は `workflow_dispatch` の input で渡し、Tailscale の hostname `simtunnel-<session>` になる。ローカルからの接続先は毎回固定の名前で解決できる
 - N 個の Simulator が欲しければ N ジョブ起動する。worktree とセッションの対応はローカル側の運用（CLI / .mcp.json）で管理し、GHA 側は関知しない
-- `simulators` input で **1 runner に複数 Simulator** も載せられる。i 台目（0 始まり・2 台目以降はデバイスの clone）の WDA が `:8100+i` / MJPEG が `:9100+i` になり、CLI / mcp-config は `--slot <i>` で台を指定する（serve-sim は sim 0 のみ）。並列上限 5 runner を超えて Simulator を増やしたい時の手段だが、runner のメモリが小さいため 2〜3 台まで（「未検証事項・リスク」参照）
+- `simulators` input で **1 runner に複数 Simulator** も載せられる。i 台目（0 始まり・2 台目以降はデバイスの clone）の WDA が `:8100+i` / MJPEG が `:9100+i` になり、CLI / mcp-config は `--slot <i>` で台を指定する。serve-sim は 1 プロセスで全台を :3200 から配信し、`preview --slot <i>` で台を切り替える。並列上限 5 runner を超えて Simulator を増やしたい時の手段だが、runner のメモリが小さいため 2〜3 台まで（「未検証事項・リスク」参照）
 
 ## 実現可能性の調査結果（2026-07-05 時点）
 
@@ -433,6 +433,9 @@ env = { SIMTUNNEL_WDA_URL = "http://simtunnel-<session>:8100" }
       （ローカルでビルドした .app を zip で転送 → install → launch のループを可能にする。
       per-repo 展開によりアプリは各 repo の runner でビルドするため優先度は下がった）
 - [x] 1 runner 複数 Simulator（完了: 2026-07-07）: `simulators` input で台数指定。2 台目以降はデバイスの clone を boot し、i 台目の WDA に per-sim の xctestrun コピーで `USE_PORT=8100+i` / `MJPEG_SERVER_PORT=9100+i` を注入する。CLI / mcp-config は `--slot` で台を指定。simulators=2 の実 run で両ポート HTTP 200・サンプルアプリ両台 install・slot 1 のみ tap して独立性をスクリーンショットで確認。ハマり: xctestrun のコピーは `__TESTROOT__` 相対で成果物を参照するため、元と同じディレクトリに置く必要がある。3 台以上のメモリ成立性は未検証
+- [x] serve-sim の複数 Simulator 対応（完了: 2026-07-10）: serve-sim は 1 プロセスで複数 UDID を配信できる（CLI が可変長で UDID を受け、デバイスごとの view は `/?device=<UDID>`、ストリームは `/helper/<UDID>/stream.mjpeg`、一覧は `/grid/api`。すべて :3200）ため、slot ごとの多重起動ではなく **全 UDID を 1 プロセスに渡す方式**を採用。tailnet への公開ポートは :3200 のまま増えず、多重起動によるメモリ増も避けられる（「リポジトリ公開に耐える安全性」の範囲内）
+  - `local/simtunnel preview <session> --slot <i>` は `/grid/api` の一覧から clone 命名（boot-simulator.sh の `<デバイス名> simtunnel-<slot+1>`）で UDID を引き当て、`?device=` 付き URL を開く。slot 0 は既定表示のため解決不要
+  - `/grid/api` と `?device=` は serve-sim の内部仕様（バージョン未固定）に依存する。preview が壊れたら serve-sim 側の変更を疑う
 
 ### Phase 5: 各アプリ repo への展開
 - [x] reusable workflow 化（完了: 2026-07-06）: `session.yml`（workflow_call）+ `simulator-session.yml`（dispatch ラッパー）に分割。ビルド対象を input 化（`build_project` / `build_scheme` / `build_configuration`）。runner スクリプトは `github.job_workflow_sha` で同一 commit を checkout。ローカル CLI は `SIMTUNNEL_REPO` / `SIMTUNNEL_WORKFLOW` で対象 repo を切り替え（詳細:「各アプリ repo での実行」）
