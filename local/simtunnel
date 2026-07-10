@@ -231,10 +231,17 @@ cmd_preview() {
   local url="http://simtunnel-${session}:3200"
   if [ "$slot" -gt 0 ]; then
     command -v jq >/dev/null 2>&1 || { echo "--slot には jq が必要（brew install jq）" >&2; return 1; }
-    local udid
-    udid=$(curl -s -m 15 "http://${ip}:3200/grid/api?limit=16" \
-      | jq -r --arg suffix " simtunnel-$((slot + 1))" \
-          '[.devices[] | select(.name | endswith($suffix))][0].device // empty')
+    # /grid/api は runner 上の全 Simulator を返すため、Booted かつ clone 名のものに絞る。
+    # 初回コールは一覧が温まっておらず空を返すことがある（実測）ためリトライする
+    local udid=""
+    local _try
+    for _try in 1 2 3; do
+      udid=$(curl -s -m 15 "http://${ip}:3200/grid/api?limit=16" \
+        | jq -r --arg suffix " simtunnel-$((slot + 1))" \
+            '[.devices[]? | select(.state == "Booted" and (.name | endswith($suffix)))][0].device // empty')
+      [ -n "$udid" ] && break
+      sleep 2
+    done
     [ -n "$udid" ] || {
       echo "slot ${slot} の Simulator を preview UI から特定できなかった（up --simulators の台数と slot を確認）" >&2
       return 1

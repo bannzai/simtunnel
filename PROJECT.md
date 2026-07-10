@@ -436,6 +436,8 @@ env = { SIMTUNNEL_WDA_URL = "http://simtunnel-<session>:8100" }
 - [x] serve-sim の複数 Simulator 対応（完了: 2026-07-10）: serve-sim は 1 プロセスで複数 UDID を配信できる（CLI が可変長で UDID を受け、デバイスごとの view は `/?device=<UDID>`、ストリームは `/helper/<UDID>/stream.mjpeg`、一覧は `/grid/api`。すべて :3200）ため、slot ごとの多重起動ではなく **全 UDID を 1 プロセスに渡す方式**を採用。tailnet への公開ポートは :3200 のまま増えず、多重起動によるメモリ増も避けられる（「リポジトリ公開に耐える安全性」の範囲内）
   - `local/simtunnel preview <session> --slot <i>` は `/grid/api` の一覧から clone 命名（boot-simulator.sh の `<デバイス名> simtunnel-<slot+1>`）で UDID を引き当て、`?device=` 付き URL を開く。slot 0 は既定表示のため解決不要
   - `/grid/api` と `?device=` は serve-sim の内部仕様（バージョン未固定）に依存する。preview が壊れたら serve-sim 側の変更を疑う
+  - 検証（simulators=2 の実 run）: 1 プロセス（:3200）から両 UDID の `/helper/<UDID>/health` HTTP 200、`?device=` による対象デバイスの切り替え、slot 1 の `/helper/<UDID>/stream.mjpeg` から DERP relay 経由でライブフレーム 17 枚（45 秒間）の取得、サマリへの slot ごとの preview URL 出力を確認。`preview --slot` の UDID 解決も実セッションで確認
+  - ハマり: `/grid/api` の初回コールは一覧が温まっておらず空を返すことがある（2 回目以降は runner 上の全 Simulator を返す）。`preview --slot` はリトライ + `state == "Booted"` フィルタで吸収
 
 ### Phase 5: 各アプリ repo への展開
 - [x] reusable workflow 化（完了: 2026-07-06）: `session.yml`（workflow_call）+ `simulator-session.yml`（dispatch ラッパー）に分割。ビルド対象を input 化（`build_project` / `build_scheme` / `build_configuration`）。runner スクリプトは `github.job_workflow_sha` で同一 commit を checkout。ローカル CLI は `SIMTUNNEL_REPO` / `SIMTUNNEL_WORKFLOW` で対象 repo を切り替え（詳細:「各アプリ repo での実行」）
