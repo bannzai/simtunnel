@@ -242,6 +242,102 @@ jobs:
 - **flow が失敗してもセッションは開く**: flow は補助であり、失敗してもセッション自体の価値は残る。失敗（maestro CLI のインストール失敗含む）は run summary に警告を出して WDA 起動へ進む
 - 実装は `runner/run-maestro.sh`（maestro CLI のインストール込み。caller repo の workspace ルートで実行される）
 
+## macOS アプリの操作（WebDriverAgentMac）
+
+iOS / iPad は Simulator 上の WDA で操作するが、macOS アプリは Simulator ではなく runner の GUI セッション（Aqua / WindowServer）で直接動く。トンネル・ephemeral・ACL・OIDC・`workflow_dispatch` のみ・SHA 固定といった安全性設計は iOS 版とそのまま共有し、**操作レイヤーだけ macOS 用に差し替える**。
+
+### 操作レイヤーの選定: WebDriverAgentMac（appium-mac2-driver 同梱）
+
+候補（XCUITest 直書き / Accessibility API 直叩き / AppleScript・System Events / cliclick + screencapture）を比較し、**WebDriverAgentMac** を採る。理由:
+
+- iOS 版と同じ WDA HTTP API（W3C WebDriver 準拠 + 拡張）で喋れるため、curl ベースの操作・simtunnel-mcp 互換レイヤーの考え方をそのまま横展開できる。必要な操作（起動 / クリック / キー入力 / スクリーンショット / アクセシビリティツリー / URL open）が 1 つの HTTP サーバで揃う
+- XCUITest ベースのため要素検索（accessibility id / predicate / class chain / xpath）と機能的検証が可能。cliclick + 画像だけの方式より壊れにくい
+- appium 本体は不要。同梱の `WebDriverAgentMac.xcodeproj`（scheme `WebDriverAgentRunner`）を `xcodebuild build-for-testing` + `test-without-building` で単体起動できる（`USE_PORT` でポート指定）。iOS 版 `start-wda.sh` と同じキャッシュ戦略が使える
+
+主なエンドポイント（実測で確認したもの）:
+
+| 操作 | エンドポイント |
+|---|---|
+| 死活確認 | `GET /status` |
+| スクリーンショット | `GET /screenshot`（base64。session 不要） |
+| セッション作成 | `POST /session` `{"capabilities":{"alwaysMatch":{"appium:bundleId":"<id>"},"firstMatch":[{}]}}` |
+| 要素検索 | `POST /session/:id/element` `{"using":"accessibility id","value":"<id>"}` |
+| クリック | `POST /session/:id/element/:uuid/click` |
+| 値の設定（入力） | `POST /session/:id/element/:uuid/value` `{"value":["..."]}` |
+| 属性取得 | `GET /session/:id/element/:uuid/attribute/:name` |
+| アクセシビリティツリー | `GET /source?format=xml`（**`format=json` は非対応**。`xml` か `description` のみ） |
+
+### iOS 版との違い
+
+- **1 GUI セッション = 1 WDA**。macOS runner は GUI セッションが 1 つなので Simulator 台数のような多重化はしない（ポートは 8100 固定）
+- **アプリ起動は LaunchServices 登録 + bundleId セッション**。ビルドした .app を `lsregister -f` で登録し、`appium:bundleId` でセッションを作ると WDA が起動・前面化まで行う（既存インスタンスは terminate して起動し直す）。iOS の simctl install/launch に相当
+- **スクリーンショットは `GET /screenshot` を既定にする**。macOS では serve-sim / MJPEG は使わない。ローカルからの取得は DERP relay 経由でも 1 枚 1 秒前後（iOS の PNG `/screenshot` が 68 秒だったのと違い、実用範囲）
+- **入力（value 設定）はフォーカス非依存で通るが、click は座標ヒットテスト**。前面に他ウィンドウ（特にモーダル）があると click 対象が `not hittable` で失敗する
+
+### ハマりどころ（実測）
+
+- **`screencapture` を使わない**。`screencapture` を runner で実行すると ScreenCaptureKit の許可ダイアログ（"bash is requesting to bypass the system private window picker…"）が画面中央にモーダルで出て、その裏のボタンが `not hittable` になり click が失敗する。画面取得は WDA の `GET /screenshot` で行えばこのダイアログは出ない（実測: screencapture 併用時 click 失敗 → 廃止後 click 成功）
+- **SIP は runner 上で無効**（`csrutil status` = disabled を macos-15 / macos-26 で確認）。このため XCUITest の自動化許可・アクセシビリティが追加設定なしで通る。`automationmodetool` / `DevToolsSecurity` / TCC.db 書き換えは不要だった
+- runner には Aqua の console session がある（`scutil` の `State:/Users/ConsoleUser` が `runner`）。GUI アプリは問題なく描画・操作できる
+
+### 実測値（2026-08-10）
+
+WebDriverAgentMac v4.1.1 / サンプル `macOSProject`（swiftc ビルドの最小 SwiftUI アプリ）。
+
+| 項目 | macos-15 (Xcode 16.4) | macos-26 (Xcode 26.6) |
+|---|---|---|
+| WDA-mac 起動（キャッシュミス / clone + build 込み） | 約 39 秒 | 約 58 秒 |
+| WDA-mac 起動（キャッシュヒット） | 約 10 秒 | 約 15 秒 |
+| `GET /screenshot`（runner ローカル / PNG 約 95〜210KB） | 126〜175ms | 288〜322ms |
+| セッション作成（runner ローカル） | 約 1.4 秒 | 約 2.1 秒 |
+| click（runner ローカル） | 約 0.4〜0.6 秒 | 約 0.6 秒 |
+| value 入力（runner ローカル） | 約 0.8 秒 | 約 3.3 秒 |
+
+ローカル（tailnet / DERP relay 経由。macos-15 セッション）: `GET /screenshot` 約 0.9 秒 / セッション作成 約 2.1 秒 / click 約 1.3 秒 / value 入力 約 1.8 秒。制御系はすべて 1〜2 秒台で実用範囲。
+
+機能的検証（click → `statusLabel` が `Clicked!` に変化 / value 入力 → `inputEcho` が `input: hello` に変化）を macos-15 / macos-26 の両 runner とローカル tailnet 経由で確認済み。
+
+### 各アプリ repo での実行（reusable workflow）
+
+iOS 版と同じく `macos-session.yml`（`workflow_call`）を各アプリ repo の薄い caller workflow から呼ぶ。simtunnel 自身は `macos-app-session.yml`（`workflow_dispatch` ラッパー）経由で呼ぶ。
+
+```yaml
+name: macos-app-session
+run-name: "session=${{ inputs.session }} runner=${{ inputs.runner }}"
+on:
+  workflow_dispatch:
+    inputs:
+      session: { required: true, default: dev-mac }
+      device: { required: false, default: "-" } # local/simtunnel 互換のため（macOS では未使用）
+      duration_minutes: { required: true, default: "30" }
+      runner: { required: false, default: macos-15 }
+jobs:
+  session:
+    permissions:
+      id-token: write
+      contents: read
+    uses: bannzai/simtunnel/.github/workflows/macos-session.yml@<commit SHA> # main
+    with:
+      session: ${{ inputs.session }}
+      runner: ${{ inputs.runner }}
+      duration_minutes: ${{ inputs.duration_minutes }}
+      build_project: MyMacApp.xcodeproj
+      build_scheme: MyMacApp
+    secrets:
+      TS_OIDC_CLIENT_ID: ${{ secrets.TS_OIDC_CLIENT_ID }}
+      TS_OIDC_AUDIENCE: ${{ secrets.TS_OIDC_AUDIENCE }}
+```
+
+ローカル CLI は iOS 版と同じものを流用できる（`macos-app-session.yml` は `device` input を宣言済みのため `up` がそのまま通る）。macOS では WDA 操作を curl か skill の `macos-wda.sh` で行う:
+
+```bash
+SIMTUNNEL_REPO=<owner>/<repo> SIMTUNNEL_WORKFLOW=macos-app-session.yml local/simtunnel up <session> --wait
+SIMTUNNEL_REPO=<owner>/<repo> SIMTUNNEL_WORKFLOW=macos-app-session.yml local/simtunnel down <session>
+```
+
+- `status` / `screenshot`（`GET /screenshot` 直叩き）/ `down` は接続先非依存で macOS セッションにもそのまま効く。serve-sim を使う `preview` と MJPEG 前提の `screenshot` の MJPEG 経路は macOS では使わない
+- 使い方・制約・`macos-wda.sh` の詳細は castle の `macos-simtunnel` skill を参照
+
 ## Tailscale セットアップ手順（Phase 0 実施記録）
 
 管理コンソールでの操作。**順序厳守（ACL が先。「リポジトリ公開に耐える安全性」の 5 を参照）**。
@@ -283,15 +379,21 @@ simtunnel/
 ├── CLAUDE.md
 ├── .github/workflows/
 │   ├── session.yml                   # reusable workflow (workflow_call): Simulator セッションの実体
-│   └── simulator-session.yml         # workflow_dispatch: simtunnel 自身用の薄いラッパー（session.yml を呼ぶ）
-├── iOSProject/                       # サンプルアプリ（SwiftUI + SwiftData / deployment target iOS 26.x）
+│   ├── simulator-session.yml         # workflow_dispatch: simtunnel 自身用の薄いラッパー（session.yml を呼ぶ）
+│   ├── macos-session.yml             # reusable workflow (workflow_call): macOS アプリセッションの実体（WDA-mac）
+│   └── macos-app-session.yml         # workflow_dispatch: macOS 用の薄いラッパー（macos-session.yml を呼ぶ）
+├── iOSProject/                       # iOS サンプルアプリ（SwiftUI + SwiftData / deployment target iOS 26.x）
+├── macOSProject/                     # macOS サンプルアプリ（swiftc ビルドの最小 SwiftUI。操作結果を accessibilityIdentifier に反映）
 ├── runner/                           # GHA 側スクリプト
 │   ├── boot-simulator.sh             # simctl boot + 起動待ち（複数ランタイム時は最新 iOS を優先）
 │   ├── install-app.sh                # app_zip_url の .app を install / launch（未指定ならスキップ）
 │   ├── install-artifact-app.sh       # app_artifact（caller build job の成果物）の .app を install / launch
 │   ├── build-app.sh                  # build_project / build_scheme を runner 上でビルドして install / launch
+│   ├── build-macos-app.sh            # macOS アプリ（サンプル or build_project）をビルドして .app パス / bundle id を出力
+│   ├── launch-macos-app.sh           # ビルド済み .app を LaunchServices 登録して起動（bundleId セッション用）
 │   ├── run-maestro.sh                # caller repo の .maestro/flows/simtunnel/setup.yml を自動検出して実行（無ければスキップ）
-│   ├── start-wda.sh                  # WDA を build-for-testing（キャッシュ対応）+ test-without-building で起動
+│   ├── start-wda.sh                  # iOS WDA を build-for-testing（キャッシュ対応）+ test-without-building で起動
+│   ├── start-wda-mac.sh              # WebDriverAgentMac を runner の GUI セッション上で起動（iOS 版の macOS 対応）
 │   ├── start-serve-sim.sh            # serve-sim を起動（ブラウザ操作 UI + ライブ映像を :3200 で配信）
 │   ├── bridge.sh                     # socat: tailscale IF → 指定ポート（直接到達可能ならスキップ）
 │   └── keepalive.sh                  # duration_minutes までジョブを維持（WDA 死活監視付き）
@@ -445,6 +547,14 @@ env = { SIMTUNNEL_WDA_URL = "http://simtunnel-<session>:8100" }
 - [x] SwiftUI 実験 repo（bannzai/SimTunnelDemoProject）で実戦（完了: 2026-07-06）: caller workflow + Secrets をセットアップし、up → status 200 → mcp-config → mobile-mcp 互換ツールで tap / screenshot / HOME / launch_app → down の一連を確認（記録: SimTunnelDemoProject PR #1 のコメント）。`local/simtunnel` は `up` だけでなく `down` / `status` 等も `SIMTUNNEL_REPO` 指定が必要
 - [x] Maestro flow の自動実行（完了: 2026-07-07）: caller repo の `.maestro/flows/simtunnel/setup.yml` を自動検出し、アプリ install / launch 後・WDA 起動前に runner 上で実行（設計:「オンボーディング突破用 Maestro flow の自動実行」）。Pilll 実 run でオンボーディング突破 → 直後の WDA 操作（tap）に干渉が無いことを確認（記録: simtunnel PR #19 コメント）。実測: maestro step 全体 約 6 分（CLI インストール約 30 秒 + ドライバ起動約 2 分 + flow 実行約 4 分）、setup.yml が無い repo でのスキップは約 0.6 秒。flow 失敗時に警告のみでセッションが開くことも実 run で確認済み
 - [x] Flutter (bannzai/Pilll) への展開（完了: 2026-07-06）: 「build job 分割 + artifact 渡し」方式で caller workflow を追加。build（`make secret` → flutter build --simulator）約 10 分 + セッション準備で、dispatch → 操作可能まで約 15 分。MCP 経由の tap（OS アラート / アプリ内ボタン → ボトムシート表示）とスクリーンショットを実 run で確認（記録: Pilll PR #1812 のコメント）。序盤 2 回の run は keepalive 早期終了（「未検証事項・リスク」参照）に当たり、keepalive 強化後の run で安定
+
+### Phase 6: macOS アプリ対応（完了: 2026-08-10）
+- [x] 操作レイヤーの選定: WebDriverAgentMac（appium-mac2-driver 同梱）を採用（設計:「macOS アプリの操作（WebDriverAgentMac）」）
+- [x] GHA macos runner の GUI セッション調査: SIP 無効 / Aqua console session あり / GUI アプリ描画可を macos-15・macos-26 で確認
+- [x] `macos-session.yml`（workflow_call）+ `macos-app-session.yml`（dispatch ラッパー）+ runner スクリプト（`start-wda-mac.sh` / `build-macos-app.sh` / `launch-macos-app.sh`）。`bridge.sh` / `keepalive.sh` はポート引数を取るため無改修で流用
+- [x] PoC: サンプル `macOSProject` を runner でビルド → WDA-mac 起動 → tailnet 越しにローカルから screenshot 取得・click・value 入力を実行し、機能的検証（`statusLabel` → `Clicked!` / `inputEcho` → `input: hello`）まで確認（実測値は「macOS アプリの操作」参照）
+- ハマり: `screencapture` が ScreenCaptureKit 許可ダイアログを出しボタンを覆って click が失敗する → 画面取得は WDA `GET /screenshot` に統一して解消
+- 使い方・制約・実測値・ハマりどころは castle の `macos-simtunnel` skill に集約
 
 ## 未検証事項・リスク
 

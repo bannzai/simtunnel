@@ -1,6 +1,6 @@
 # simtunnel
 
-GitHub Actions の macOS Runner 上で iOS Simulator + WebDriverAgent を起動し、Tailscale 経由でローカルの Claude / Codex から操作・スクリーンショット取得するためのツール群。
+GitHub Actions の macOS Runner 上で iOS Simulator + WebDriverAgent を起動し、Tailscale 経由でローカルの Claude / Codex から操作・スクリーンショット取得するためのツール群。macOS アプリは Simulator ではなく runner の GUI セッションで直接動かし、操作レイヤーに WebDriverAgentMac を使う（設計は PROJECT.md「macOS アプリの操作（WebDriverAgentMac）」参照）。
 
 ## ドキュメント
 - 設計・採用理由・実装フェーズの SSOT は PROJECT.md。設計に関わる変更をしたら同じ変更で PROJECT.md も更新する
