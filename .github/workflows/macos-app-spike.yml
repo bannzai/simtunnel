@@ -7,13 +7,6 @@ name: macos-app-spike
 
 on:
   workflow_dispatch: {}
-  # レビュー指摘の修正を feature ブランチで自走検証するための一時トリガー (secret 非依存)。検証後に撤去する。
-  push:
-    branches:
-      - issue-23
-    paths:
-      - .github/workflows/macos-app-spike.yml
-      - runner/macos-app-spike.sh
 
 jobs:
   spike:
