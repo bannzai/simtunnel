@@ -28,3 +28,12 @@ jobs:
 
       - name: スパイクを実行
         run: ./runner/macos-app-spike.sh
+
+      # スクリーンショット等の証跡を回収して go/no-go を視覚的に確認する
+      - name: 証跡を artifact に上げる
+        if: always()
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
+        with:
+          name: macos-app-spike
+          path: spike-out
+          if-no-files-found: warn
