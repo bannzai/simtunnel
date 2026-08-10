@@ -1,0 +1,175 @@
+# macOS runner の GUI セッションで macOS アプリを操作できるかを実測する診断 workflow。
+# PoC 完了後に削除する（結果は PROJECT.md に転記する）。tailnet には参加しない（純粋にローカル計測）。
+name: macos-diagnose
+
+on:
+  push:
+    branches: [macos-app-session]
+  workflow_dispatch:
+
+jobs:
+  diagnose:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, macos-26]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+
+      - name: GUI セッション・SIP を調査
+        run: |
+          echo "## runner env" | tee -a "$GITHUB_STEP_SUMMARY"
+          {
+            echo '```'
+            echo "os: ${{ matrix.os }}"
+            echo "whoami: $(whoami)"
+            echo "csrutil: $(csrutil status 2>&1 || true)"
+            echo "xcode: $(xcodebuild -version | tr '\n' ' ')"
+            echo "--- launchctl print gui ---"
+            launchctl print "gui/$(id -u)" 2>&1 | head -20 || echo "launchctl print gui: 取得不可"
+            echo "--- Aqua session (scutil) ---"
+            echo 'show State:/Users/ConsoleUser' | scutil 2>&1 | head -10 || true
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: サンプル macOS アプリをビルド・起動して screencapture
+        id: launch
+        run: |
+          ./macOSProject/build.sh
+          APP="macOSProject/build/MacSample.app"
+          open "$APP"
+          sleep 5
+          echo "--- running apps ---"
+          osascript -e 'tell application "System Events" to get name of every process whose background only is false' 2>&1 || true
+          mkdir -p artifacts
+          # 画面全体のスクリーンショット（GUI セッションが無ければ黒画像 or 失敗する）
+          screencapture -x "artifacts/screen-${{ matrix.os }}.png" 2>&1 || echo "screencapture 失敗"
+          ls -la artifacts/ || true
+
+      - name: UI automation の許可を試行
+        continue-on-error: true
+        run: |
+          echo "--- DevToolsSecurity ---"
+          sudo DevToolsSecurity -enable 2>&1 || true
+          echo "--- automationmodetool ---"
+          sudo automationmodetool enable-automationmode-without-authentication 2>&1 || true
+          echo "--- TCC (参考: SIP 無効時のみ書き込み可) ---"
+          csrutil status 2>&1 || true
+
+      - name: Xcode バージョンを取得（キャッシュキー用）
+        id: xcode
+        run: echo "version=$(xcodebuild -version | tr '\n' '_' | tr ' ' '.')" >> "$GITHUB_OUTPUT"
+
+      - name: WDA-mac ビルドキャッシュを復元
+        id: wda-cache
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: wda-mac-dd/Build/Products
+          key: wda-mac-v4.1.1-${{ runner.arch }}-${{ steps.xcode.outputs.version }}
+
+      - name: WebDriverAgentMac を起動
+        id: wda
+        continue-on-error: true
+        env:
+          WDA_MAC_REF: v4.1.1
+        run: |
+          T0=$(date +%s)
+          ./runner/start-wda-mac.sh 8100
+          T1=$(date +%s)
+          echo "wda_startup_seconds=$((T1 - T0))" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: WDA-mac ビルドキャッシュを保存
+        if: steps.wda-cache.outputs.cache-hit != 'true' && steps.wda.outcome == 'success'
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: wda-mac-dd/Build/Products
+          key: wda-mac-v4.1.1-${{ runner.arch }}-${{ steps.xcode.outputs.version }}
+
+      - name: WDA-mac 経由で操作を実測
+        if: steps.wda.outcome == 'success'
+        continue-on-error: true
+        run: |
+          mkdir -p artifacts
+          BASE="http://127.0.0.1:8100"
+          echo "## WDA-mac operations (${{ matrix.os }})" | tee -a "$GITHUB_STEP_SUMMARY"
+          echo '```' | tee -a "$GITHUB_STEP_SUMMARY"
+
+          echo "--- GET /status ---" | tee -a "$GITHUB_STEP_SUMMARY"
+          curl -s "$BASE/status" | tee -a "$GITHUB_STEP_SUMMARY"; echo
+
+          # session-less screenshot のレイテンシ
+          T0=$(python3 -c 'import time;print(int(time.time()*1000))')
+          curl -s "$BASE/screenshot" -o artifacts/wda-screenshot-nosession-${{ matrix.os }}.json
+          T1=$(python3 -c 'import time;print(int(time.time()*1000))')
+          echo "screenshot_nosession_ms=$((T1 - T0))" | tee -a "$GITHUB_STEP_SUMMARY"
+          python3 -c "import json,base64,sys; d=json.load(open('artifacts/wda-screenshot-nosession-${{ matrix.os }}.json')); open('artifacts/wda-screenshot-nosession-${{ matrix.os }}.png','wb').write(base64.b64decode(d['value'])); print('screenshot bytes:', len(d['value']))" 2>&1 | tee -a "$GITHUB_STEP_SUMMARY" || echo "screenshot decode 失敗"
+
+          # セッション作成（サンプルアプリを対象に）
+          echo "--- POST /session ---" | tee -a "$GITHUB_STEP_SUMMARY"
+          T0=$(python3 -c 'import time;print(int(time.time()*1000))')
+          SID=$(curl -s -X POST "$BASE/session" -H 'Content-Type: application/json' \
+            -d '{"capabilities":{"alwaysMatch":{"appium:bundleId":"com.bannzai.simtunnel.MacSample"},"firstMatch":[{}]}}' \
+            | tee -a "$GITHUB_STEP_SUMMARY" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("sessionId",""))' 2>/dev/null || true)
+          T1=$(python3 -c 'import time;print(int(time.time()*1000))')
+          echo; echo "session_create_ms=$((T1 - T0)) sessionId=${SID}" | tee -a "$GITHUB_STEP_SUMMARY"
+
+          if [ -n "$SID" ]; then
+            # source（アクセシビリティツリー）取得
+            curl -s "$BASE/source?format=json" -o artifacts/wda-source-${{ matrix.os }}.json
+            echo "source bytes: $(wc -c < artifacts/wda-source-${{ matrix.os }}.json)" | tee -a "$GITHUB_STEP_SUMMARY"
+
+            # clickButton を探す
+            FIND=$(curl -s -X POST "$BASE/session/$SID/element" -H 'Content-Type: application/json' \
+              -d '{"using":"accessibility id","value":"clickButton"}')
+            echo "find clickButton: $FIND" | tee -a "$GITHUB_STEP_SUMMARY"; echo
+            EID=$(echo "$FIND" | python3 -c 'import json,sys; v=json.load(sys.stdin).get("value",{}); print(v.get("ELEMENT") or v.get("element-6066-11e4-a52e-4f735466cecf") or "")' 2>/dev/null || true)
+
+            if [ -n "$EID" ]; then
+              T0=$(python3 -c 'import time;print(int(time.time()*1000))')
+              curl -s -X POST "$BASE/session/$SID/element/$EID/click" -d '{}' | tee -a "$GITHUB_STEP_SUMMARY"; echo
+              T1=$(python3 -c 'import time;print(int(time.time()*1000))')
+              echo "click_ms=$((T1 - T0))" | tee -a "$GITHUB_STEP_SUMMARY"
+
+              # statusLabel を読み、クリックが反映されたか機械判定
+              SFIND=$(curl -s -X POST "$BASE/session/$SID/element" -H 'Content-Type: application/json' \
+                -d '{"using":"accessibility id","value":"statusLabel"}')
+              SEID=$(echo "$SFIND" | python3 -c 'import json,sys; v=json.load(sys.stdin).get("value",{}); print(v.get("ELEMENT") or v.get("element-6066-11e4-a52e-4f735466cecf") or "")' 2>/dev/null || true)
+              if [ -n "$SEID" ]; then
+                LABEL=$(curl -s "$BASE/session/$SID/element/$SEID/attribute/value")
+                echo "statusLabel value after click: $LABEL" | tee -a "$GITHUB_STEP_SUMMARY"; echo
+              fi
+            fi
+
+            # キー入力（inputField を探して value 設定）
+            IFIND=$(curl -s -X POST "$BASE/session/$SID/element" -H 'Content-Type: application/json' \
+              -d '{"using":"accessibility id","value":"inputField"}')
+            IEID=$(echo "$IFIND" | python3 -c 'import json,sys; v=json.load(sys.stdin).get("value",{}); print(v.get("ELEMENT") or v.get("element-6066-11e4-a52e-4f735466cecf") or "")' 2>/dev/null || true)
+            if [ -n "$IEID" ]; then
+              T0=$(python3 -c 'import time;print(int(time.time()*1000))')
+              curl -s -X POST "$BASE/session/$SID/element/$IEID/value" -H 'Content-Type: application/json' -d '{"value":["hello"]}' | tee -a "$GITHUB_STEP_SUMMARY"; echo
+              T1=$(python3 -c 'import time;print(int(time.time()*1000))')
+              echo "type_ms=$((T1 - T0))" | tee -a "$GITHUB_STEP_SUMMARY"
+            fi
+
+            # 操作後の screencapture（実 GUI に反映されているか）
+            screencapture -x "artifacts/screen-after-ops-${{ matrix.os }}.png" 2>&1 || true
+          fi
+          echo '```' | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: WDA-mac ログを退避
+        if: always()
+        run: |
+          mkdir -p artifacts
+          cp "${RUNNER_TEMP}"/wda-mac-*.log artifacts/ 2>/dev/null || true
+
+      - name: artifact をアップロード
+        if: always()
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
+        with:
+          name: diagnose-${{ matrix.os }}
+          path: artifacts/
+          if-no-files-found: warn
