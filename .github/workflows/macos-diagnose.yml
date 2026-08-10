@@ -36,7 +36,7 @@ jobs:
             echo '```'
           } | tee -a "$GITHUB_STEP_SUMMARY"
 
-      - name: サンプル macOS アプリをビルド・起動して screencapture
+      - name: サンプル macOS アプリをビルド・起動
         id: launch
         run: |
           ./macOSProject/build.sh
@@ -45,20 +45,6 @@ jobs:
           sleep 5
           echo "--- running apps ---"
           osascript -e 'tell application "System Events" to get name of every process whose background only is false' 2>&1 || true
-          mkdir -p artifacts
-          # 画面全体のスクリーンショット（GUI セッションが無ければ黒画像 or 失敗する）
-          screencapture -x "artifacts/screen-${{ matrix.os }}.png" 2>&1 || echo "screencapture 失敗"
-          ls -la artifacts/ || true
-
-      - name: UI automation の許可を試行
-        continue-on-error: true
-        run: |
-          echo "--- DevToolsSecurity ---"
-          sudo DevToolsSecurity -enable 2>&1 || true
-          echo "--- automationmodetool ---"
-          sudo automationmodetool enable-automationmode-without-authentication 2>&1 || true
-          echo "--- TCC (参考: SIP 無効時のみ書き込み可) ---"
-          csrutil status 2>&1 || true
 
       - name: Xcode バージョンを取得（キャッシュキー用）
         id: xcode
@@ -95,68 +81,79 @@ jobs:
         run: |
           mkdir -p artifacts
           BASE="http://127.0.0.1:8100"
-          echo "## WDA-mac operations (${{ matrix.os }})" | tee -a "$GITHUB_STEP_SUMMARY"
+          OS="${{ matrix.os }}"
+          now_ms() { python3 -c 'import time;print(int(time.time()*1000))'; }
+          element_id() { python3 -c 'import json,sys; v=json.load(sys.stdin).get("value",{}); print(v.get("ELEMENT") or v.get("element-6066-11e4-a52e-4f735466cecf") or "")' 2>/dev/null || true; }
+          find_el() { curl -s -X POST "$BASE/session/$1/element" -H 'Content-Type: application/json' -d "{\"using\":\"accessibility id\",\"value\":\"$2\"}"; }
+          save_shot() { # $1=out.png
+            local tmp; tmp="$(mktemp)"
+            curl -s "$BASE/screenshot" -o "$tmp"
+            python3 -c "import json,base64,sys; d=json.load(open('$tmp')); open('$1','wb').write(base64.b64decode(d['value']))" 2>/dev/null \
+              && echo "saved: $1 ($(wc -c < "$1") bytes)" || echo "screenshot decode 失敗"
+          }
+          echo "## WDA-mac operations ($OS)" | tee -a "$GITHUB_STEP_SUMMARY"
           echo '```' | tee -a "$GITHUB_STEP_SUMMARY"
 
           echo "--- GET /status ---" | tee -a "$GITHUB_STEP_SUMMARY"
           curl -s "$BASE/status" | tee -a "$GITHUB_STEP_SUMMARY"; echo
 
           # session-less screenshot のレイテンシ
-          T0=$(python3 -c 'import time;print(int(time.time()*1000))')
-          curl -s "$BASE/screenshot" -o artifacts/wda-screenshot-nosession-${{ matrix.os }}.json
-          T1=$(python3 -c 'import time;print(int(time.time()*1000))')
+          T0=$(now_ms)
+          curl -s "$BASE/screenshot" -o "artifacts/wda-shot-nosession-$OS.json"
+          T1=$(now_ms)
           echo "screenshot_nosession_ms=$((T1 - T0))" | tee -a "$GITHUB_STEP_SUMMARY"
-          python3 -c "import json,base64,sys; d=json.load(open('artifacts/wda-screenshot-nosession-${{ matrix.os }}.json')); open('artifacts/wda-screenshot-nosession-${{ matrix.os }}.png','wb').write(base64.b64decode(d['value'])); print('screenshot bytes:', len(d['value']))" 2>&1 | tee -a "$GITHUB_STEP_SUMMARY" || echo "screenshot decode 失敗"
+          python3 -c "import json,base64; d=json.load(open('artifacts/wda-shot-nosession-$OS.json')); open('artifacts/wda-shot-nosession-$OS.png','wb').write(base64.b64decode(d['value'])); print('screenshot bytes:', len(d['value']))" 2>&1 | tee -a "$GITHUB_STEP_SUMMARY" || echo "screenshot decode 失敗"
 
           # セッション作成（サンプルアプリを対象に）
           echo "--- POST /session ---" | tee -a "$GITHUB_STEP_SUMMARY"
-          T0=$(python3 -c 'import time;print(int(time.time()*1000))')
+          T0=$(now_ms)
           SID=$(curl -s -X POST "$BASE/session" -H 'Content-Type: application/json' \
             -d '{"capabilities":{"alwaysMatch":{"appium:bundleId":"com.bannzai.simtunnel.MacSample"},"firstMatch":[{}]}}' \
             | tee -a "$GITHUB_STEP_SUMMARY" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("sessionId",""))' 2>/dev/null || true)
-          T1=$(python3 -c 'import time;print(int(time.time()*1000))')
+          T1=$(now_ms)
           echo; echo "session_create_ms=$((T1 - T0)) sessionId=${SID}" | tee -a "$GITHUB_STEP_SUMMARY"
 
           if [ -n "$SID" ]; then
-            # source（アクセシビリティツリー）取得
-            curl -s "$BASE/source?format=json" -o artifacts/wda-source-${{ matrix.os }}.json
-            echo "source bytes: $(wc -c < artifacts/wda-source-${{ matrix.os }}.json)" | tee -a "$GITHUB_STEP_SUMMARY"
+            # source（アクセシビリティツリー）取得。json 非対応のため xml
+            curl -s "$BASE/source?format=xml" -o "artifacts/wda-source-$OS.xml"
+            echo "source bytes: $(wc -c < "artifacts/wda-source-$OS.xml")" | tee -a "$GITHUB_STEP_SUMMARY"
 
-            # clickButton を探す
-            FIND=$(curl -s -X POST "$BASE/session/$SID/element" -H 'Content-Type: application/json' \
-              -d '{"using":"accessibility id","value":"clickButton"}')
-            echo "find clickButton: $FIND" | tee -a "$GITHUB_STEP_SUMMARY"; echo
-            EID=$(echo "$FIND" | python3 -c 'import json,sys; v=json.load(sys.stdin).get("value",{}); print(v.get("ELEMENT") or v.get("element-6066-11e4-a52e-4f735466cecf") or "")' 2>/dev/null || true)
+            save_shot "artifacts/before-$OS.png" | tee -a "$GITHUB_STEP_SUMMARY"
 
+            # clickButton を探してクリック
+            EID=$(find_el "$SID" clickButton | element_id)
+            echo "clickButton element: ${EID:-<not found>}" | tee -a "$GITHUB_STEP_SUMMARY"
             if [ -n "$EID" ]; then
-              T0=$(python3 -c 'import time;print(int(time.time()*1000))')
-              curl -s -X POST "$BASE/session/$SID/element/$EID/click" -d '{}' | tee -a "$GITHUB_STEP_SUMMARY"; echo
-              T1=$(python3 -c 'import time;print(int(time.time()*1000))')
-              echo "click_ms=$((T1 - T0))" | tee -a "$GITHUB_STEP_SUMMARY"
-
-              # statusLabel を読み、クリックが反映されたか機械判定
-              SFIND=$(curl -s -X POST "$BASE/session/$SID/element" -H 'Content-Type: application/json' \
-                -d '{"using":"accessibility id","value":"statusLabel"}')
-              SEID=$(echo "$SFIND" | python3 -c 'import json,sys; v=json.load(sys.stdin).get("value",{}); print(v.get("ELEMENT") or v.get("element-6066-11e4-a52e-4f735466cecf") or "")' 2>/dev/null || true)
-              if [ -n "$SEID" ]; then
-                LABEL=$(curl -s "$BASE/session/$SID/element/$SEID/attribute/value")
-                echo "statusLabel value after click: $LABEL" | tee -a "$GITHUB_STEP_SUMMARY"; echo
-              fi
+              T0=$(now_ms)
+              CLICK_RESP=$(curl -s -X POST "$BASE/session/$SID/element/$EID/click" -d '{}')
+              T1=$(now_ms)
+              echo "click_ms=$((T1 - T0)) resp=${CLICK_RESP}" | tee -a "$GITHUB_STEP_SUMMARY"
             fi
 
-            # キー入力（inputField を探して value 設定）
-            IFIND=$(curl -s -X POST "$BASE/session/$SID/element" -H 'Content-Type: application/json' \
-              -d '{"using":"accessibility id","value":"inputField"}')
-            IEID=$(echo "$IFIND" | python3 -c 'import json,sys; v=json.load(sys.stdin).get("value",{}); print(v.get("ELEMENT") or v.get("element-6066-11e4-a52e-4f735466cecf") or "")' 2>/dev/null || true)
+            # statusLabel を読み、クリックが反映されたか機械判定（機能的検証）
+            SEID=$(find_el "$SID" statusLabel | element_id)
+            if [ -n "$SEID" ]; then
+              LABEL=$(curl -s "$BASE/session/$SID/element/$SEID/attribute/value" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("value",""))' 2>/dev/null || true)
+              echo "statusLabel after click: '${LABEL}'" | tee -a "$GITHUB_STEP_SUMMARY"
+              [ "$LABEL" = "Clicked!" ] && echo "CLICK_VERIFIED=yes" | tee -a "$GITHUB_STEP_SUMMARY" || echo "CLICK_VERIFIED=no" | tee -a "$GITHUB_STEP_SUMMARY"
+            fi
+
+            # キー入力（inputField に value 設定）→ inputEcho で機能的検証
+            IEID=$(find_el "$SID" inputField | element_id)
             if [ -n "$IEID" ]; then
-              T0=$(python3 -c 'import time;print(int(time.time()*1000))')
-              curl -s -X POST "$BASE/session/$SID/element/$IEID/value" -H 'Content-Type: application/json' -d '{"value":["hello"]}' | tee -a "$GITHUB_STEP_SUMMARY"; echo
-              T1=$(python3 -c 'import time;print(int(time.time()*1000))')
+              T0=$(now_ms)
+              curl -s -X POST "$BASE/session/$SID/element/$IEID/value" -H 'Content-Type: application/json' -d '{"value":["hello"]}' >/dev/null
+              T1=$(now_ms)
               echo "type_ms=$((T1 - T0))" | tee -a "$GITHUB_STEP_SUMMARY"
             fi
+            EEID=$(find_el "$SID" inputEcho | element_id)
+            if [ -n "$EEID" ]; then
+              ECHO=$(curl -s "$BASE/session/$SID/element/$EEID/attribute/value" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("value",""))' 2>/dev/null || true)
+              echo "inputEcho after type: '${ECHO}'" | tee -a "$GITHUB_STEP_SUMMARY"
+              [ "$ECHO" = "input: hello" ] && echo "TYPE_VERIFIED=yes" | tee -a "$GITHUB_STEP_SUMMARY" || echo "TYPE_VERIFIED=no" | tee -a "$GITHUB_STEP_SUMMARY"
+            fi
 
-            # 操作後の screencapture（実 GUI に反映されているか）
-            screencapture -x "artifacts/screen-after-ops-${{ matrix.os }}.png" 2>&1 || true
+            save_shot "artifacts/after-$OS.png" | tee -a "$GITHUB_STEP_SUMMARY"
           fi
           echo '```' | tee -a "$GITHUB_STEP_SUMMARY"
 
