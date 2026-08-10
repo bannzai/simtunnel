@@ -21,7 +21,7 @@ on:
         description: "セッション維持時間（分）"
         type: string
         required: false
-        default: "30"
+        default: "60"
       sample_app:
         description: "リポジトリ内サンプル (macOSProject/MacSample.app) をビルドして起動する"
         type: string
@@ -63,10 +63,12 @@ jobs:
     permissions:
       id-token: write
       contents: read
-    # 同名セッションの同時起動を防ぐ（tailnet ホスト名の衝突防止）。
+    # 同名セッションの同時起動を防ぐ（tailnet ホスト名 simtunnel-<session> の衝突防止）。
+    # iOS 版 session.yml と同じグループ名を共有し、同一 repo で iOS/macOS を同名セッションで
+    # 準備中にしても直列化されるようにする（tailnet ホスト名は iOS/macOS 共通のため）。
     # グループは caller リポジトリ単位のため、repo を跨いだ同名セッションは防げない
     concurrency:
-      group: macos-session-${{ inputs.session }}
+      group: simulator-session-${{ inputs.session }}
       cancel-in-progress: false
     steps:
       - name: 入力を検証

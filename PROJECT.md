@@ -335,7 +335,7 @@ SIMTUNNEL_REPO=<owner>/<repo> SIMTUNNEL_WORKFLOW=macos-app-session.yml local/sim
 SIMTUNNEL_REPO=<owner>/<repo> SIMTUNNEL_WORKFLOW=macos-app-session.yml local/simtunnel down <session>
 ```
 
-- `status` / `screenshot`（`GET /screenshot` 直叩き）/ `down` は接続先非依存で macOS セッションにもそのまま効く。serve-sim を使う `preview` と MJPEG 前提の `screenshot` の MJPEG 経路は macOS では使わない
+- `status` / `down` は接続先非依存で macOS セッションにもそのまま効く。**`local/simtunnel screenshot` は :9100 の MJPEG を取得する実装のため macOS では使えない**（WDA-mac は MJPEG を提供しない）。画面取得は WDA の `GET /screenshot`（:8100）を curl か skill の `macos-wda.sh screenshot` で行う。serve-sim を使う `preview` も macOS では使わない
 - 使い方・制約・`macos-wda.sh` の詳細は castle の `macos-simtunnel` skill を参照
 
 ## Tailscale セットアップ手順（Phase 0 実施記録）

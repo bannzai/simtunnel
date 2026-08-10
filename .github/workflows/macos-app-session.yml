@@ -24,15 +24,11 @@ on:
       duration_minutes:
         description: "セッション維持時間（分）"
         required: true
-        default: "30"
+        default: "60"
       runner:
         description: "実行する macOS runner ラベル（macos-15 / macos-26）"
         required: false
         default: macos-15
-      sample_app:
-        description: "リポジトリ内サンプル (macOSProject/MacSample.app) をビルドして起動する"
-        required: false
-        default: "true"
 
 jobs:
   session:
@@ -45,7 +41,9 @@ jobs:
       session: ${{ inputs.session }}
       runner: ${{ inputs.runner }}
       duration_minutes: ${{ inputs.duration_minutes }}
-      sample_app: ${{ inputs.sample_app }}
+      # 本ラッパーは simtunnel 自身の self-test 用のため常にサンプルアプリを使う。
+      # 実アプリは各 repo の caller workflow から build_project 指定で macos-session.yml を呼ぶ
+      sample_app: "true"
     secrets:
       TS_OIDC_CLIENT_ID: ${{ secrets.TS_OIDC_CLIENT_ID }}
       TS_OIDC_AUDIENCE: ${{ secrets.TS_OIDC_AUDIENCE }}

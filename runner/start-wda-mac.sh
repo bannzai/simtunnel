@@ -59,7 +59,8 @@ plist_set() {
     || /usr/libexec/PlistBuddy -c "Add :${keypath} string ${value}" "$file"
 }
 
-LOG="${WORK}/wda-mac-${PORT}.log"
+# ログ名は共用 keepalive.sh が無応答時に tail する wda-<port>.log に合わせる
+LOG="${WORK}/wda-${PORT}.log"
 
 # ポートは xctestrun のコピーに環境変数として注入する（xcodebuild のプロセス env も併せて渡す）。
 # xctestrun 内の成果物パスは __TESTROOT__（= xctestrun のあるディレクトリ）相対のため、

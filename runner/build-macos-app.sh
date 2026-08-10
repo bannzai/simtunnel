@@ -38,19 +38,31 @@ case "$PROJECT" in
   *) CONTAINER=(-project "${ROOT}/${PROJECT}") ;;
 esac
 
-xcodebuild \
-  "${CONTAINER[@]}" \
-  -scheme "$SCHEME" \
-  -destination "platform=macOS" \
-  -derivedDataPath "$DD" \
-  -configuration "$CONFIGURATION" \
-  build >"${WORK}/macos-app-build.log" 2>&1 || {
+BUILD_ARGS=(
+  "${CONTAINER[@]}"
+  -scheme "$SCHEME"
+  -destination "platform=macOS"
+  -derivedDataPath "$DD"
+  -configuration "$CONFIGURATION"
+)
+
+xcodebuild "${BUILD_ARGS[@]}" build >"${WORK}/macos-app-build.log" 2>&1 || {
   echo "アプリのビルドに失敗。ログ末尾:" >&2
   tail -n 150 "${WORK}/macos-app-build.log" >&2
   exit 1
 }
 
-APP_PATH=$(find "${DD}/Build/Products/${CONFIGURATION}" -maxdepth 1 -name "*.app" -type d | head -1)
+# 同一 scheme が複数の .app（UI テスト runner・ヘルパー等）を生成する場合に別アプリを掴まないよう、
+# build settings からメインアプリの成果物を一意に特定する（find | head -1 は列挙順が未定義）
+SETTINGS=$(xcodebuild "${BUILD_ARGS[@]}" -showBuildSettings 2>/dev/null)
+setting() { echo "$SETTINGS" | awk -F' = ' -v k=" $1 =" 'index($0, k){print $2; exit}'; }
+BUILD_DIR=$(setting TARGET_BUILD_DIR)
+WRAPPER_NAME=$(setting WRAPPER_NAME)
+if [ -n "$BUILD_DIR" ] && [ -n "$WRAPPER_NAME" ] && [ -d "${BUILD_DIR}/${WRAPPER_NAME}" ]; then
+  APP_PATH="${BUILD_DIR}/${WRAPPER_NAME}"
+else
+  APP_PATH=$(find "${DD}/Build/Products/${CONFIGURATION}" -maxdepth 1 -name "*.app" -type d | head -1)
+fi
 [ -n "$APP_PATH" ] || { echo "ビルド後に .app が見つからない: ${DD}/Build/Products/${CONFIGURATION}" >&2; exit 1; }
 BUNDLE_ID=$(/usr/libexec/PlistBuddy -c 'Print CFBundleIdentifier' "${APP_PATH}/Contents/Info.plist")
 emit "$APP_PATH" "$BUNDLE_ID"
