@@ -125,6 +125,30 @@ WDA API は WebDriver 準拠 + 拡張で、必要な操作は全て HTTP で足�
 
 simctl が必要な操作（アプリの install / launch / terminate 等）は、Phase 1〜3 では workflow の step として GHA 側で実行し、Phase 4 で runner 上の小さな HTTP 受け口（simtunnel-agentd）に置き換える。
 
+### macOS アプリ対応（issue #23）
+
+macOS アプリを複数 worktree / 複数 AI Agent で並列開発すると、ローカルの 1 GUI セッションを全員が共有して E2E 検証が衝突する（最前面ウィンドウ・入力フォーカス・URL scheme 配送先・ホスト状態の取り合い）。simtunnel の「1 job = 1 runner = 1 セッション」を macOS へ広げると、1 セッション = 1 台の独立デスクトップになり、この共有資源の衝突が構造的に解消される。
+
+**現況**: go/no-go スパイクで実現可能性を検証済み（結果: **GO**）。本実装（session workflow の macOS 版）は未着手。
+
+**スパイク**: `.github/workflows/macos-app-spike.yml`（workflow_dispatch）+ `runner/macos-app-spike.sh`。secret を使わず tailnet にも参加せず、macos-26 runner 内で WebDriverAgentMac を単体起動して検証する。runner image / Xcode 更新時の回帰確認として手動 dispatch で再実行できる。結果は job summary の SPIKE RESULT と artifact `macos-app-spike`（スクリーンショット等）で判断する。
+
+**スパイク実測（GO / macos-26 / Xcode 26.5 / appium-mac2-driver v4.1.1 同梱の WebDriverAgentMac）**:
+
+- **単体起動できる**: Appium 本体なしで `xcodebuild build-for-testing test-without-building -project WebDriverAgentMac.xcodeproj -scheme WebDriverAgentRunner -destination 'platform=macOS'`（環境変数 `USE_PORT` / `USE_HOST`）で起動し `/status` が応答。署名は ad-hoc の "Sign to Run Locally" で成立し dev 証明書は不要。デフォルト port は 10100
+- **画面が撮れる**: `GET /screenshot`（`XCUIScreen.screenshot` 経路）で実画面のフル内容を取得できる（Calculator・Dock・メニューバーが写ることをスクショで確認）。`screencapture` CLI は macos-26 で ScreenCaptureKit の同意モーダルが絡み実内容が保証されないため、スクショは iOS の MJPEG と同様に WDA 側へ寄せる
+- **アプリを操作できる**: `POST /session`（`appium:bundleId` で対象アプリを launch）→ キー入力（`/wda/keys`）で Calculator に `7*8=` を入力し結果 56 がアクセシビリティツリーに反映されることを確認。座標クリック（`/wda/click`）と W3C actions（`POST /session/:id/actions`）はいずれも 200
+- **TCC**: `kTCCServiceAccessibility` は macos-26 runner で `com.apple.dt.Xcode-Helper` に既に付与済みで、XCTest 経由の操作・アクセシビリティツリー取得・スクショに追加付与は不要だった
+
+**実装上の注意（mac2 の癖。本実装で踏む）**:
+
+- `/source` は `format=xml` / `description` のみ対応（`json` は非対応）
+- W3C actions の `pointerMove` は `duration` を秒に変換して `> 0.001s` を要求するため、ミリ秒指定の `1` は境界で弾かれる（2ms 以上にする）
+- macOS のデスクトップは 1 runner に 1 つのため、iOS の `simulators` input（1 runner に複数台）に相当する並列は作れない。並列は runner 数で確保する
+- 日本語 IME を通した入力検証は入力ソース有効化と IME 経由のキー合成が要り難易度が高いため、初期スコープ外
+
+**本実装（step 2）の方針（案）**: iOS の `session.yml`（reusable workflow）+ 各アプリ repo の薄い caller という既存構成を macOS へそのまま展開する。流用するのは Tailscale OIDC / ACL / socat bridge / `local/simtunnel` のセッション管理 / `duration_minutes` の自動終了。差し替えるのは (a) Simulator boot → 対象 macOS アプリの build / launch、(b) iOS WDA → WebDriverAgentMac（port 10100）、(c) ライブ映像（serve-sim 相当）は WDA の screenshot ポーリング等で要検討。`open -g` による URL scheme 発火・`screencapture`・tmux 操作はシェルで runner 上直接実行する。
+
 ### 各アプリ repo での実行（reusable workflow）
 
 GitHub の Additional Product Terms は、GitHub-hosted runner の用途を「workflow が動く repo に紐づくソフトウェアプロジェクト」の production / testing / deployment / publication に限定している（https://docs.github.com/en/site-policy/github-terms/github-terms-for-additional-products-and-features ）。simtunnel の runner で他アプリをビルド・操作するのはこれに抵触するため、**実アプリで使う時は各アプリ repo で workflow を動かす**。
@@ -283,10 +307,12 @@ simtunnel/
 ├── CLAUDE.md
 ├── .github/workflows/
 │   ├── session.yml                   # reusable workflow (workflow_call): Simulator セッションの実体
-│   └── simulator-session.yml         # workflow_dispatch: simtunnel 自身用の薄いラッパー（session.yml を呼ぶ）
+│   ├── simulator-session.yml         # workflow_dispatch: simtunnel 自身用の薄いラッパー（session.yml を呼ぶ）
+│   └── macos-app-spike.yml           # workflow_dispatch: macOS アプリ対応の go/no-go スパイク（issue #23 / 検証専用）
 ├── iOSProject/                       # サンプルアプリ（SwiftUI + SwiftData / deployment target iOS 26.x）
 ├── runner/                           # GHA 側スクリプト
 │   ├── boot-simulator.sh             # simctl boot + 起動待ち（複数ランタイム時は最新 iOS を優先）
+│   ├── macos-app-spike.sh            # macOS アプリ対応スパイクの実体（WebDriverAgentMac 単体起動 + 操作の実測）
 │   ├── install-app.sh                # app_zip_url の .app を install / launch（未指定ならスキップ）
 │   ├── install-artifact-app.sh       # app_artifact（caller build job の成果物）の .app を install / launch
 │   ├── build-app.sh                  # build_project / build_scheme を runner 上でビルドして install / launch
