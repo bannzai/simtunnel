@@ -141,12 +141,13 @@ if [ "$WDA_ALIVE" -eq 1 ]; then
       && record OK wda-click "座標クリック (/wda/click) が HTTP 200" \
       || record NG wda-click "座標クリックが HTTP ${CLICK_CODE}: $(head -c 200 "${SPIKE_OUT}/click.json")"
 
-    # W3C actions (mobile-mcp 互換レイヤーが使う経路)。mac2 は pointerMove の duration >= 1ms を要求する。
+    # W3C actions (mobile-mcp 互換レイヤーが使う経路)。mac2 は pointerMove の duration を秒に変換して
+    # XCPointerEventPath に渡し duration > 0.001s を要求するため、ミリ秒指定は 1 では境界で弾かれる (>1ms 必須)。
     ACT_CODE=$(curl -s -m 30 -o "${SPIKE_OUT}/actions.json" -w '%{http_code}' -X POST "${BASE}/session/${SID}/actions" \
       -H 'Content-Type: application/json' \
-      -d '{"actions":[{"type":"pointer","id":"mouse","parameters":{"pointerType":"mouse"},"actions":[{"type":"pointerMove","duration":1,"x":100,"y":120},{"type":"pointerDown","button":0},{"type":"pause","duration":50},{"type":"pointerUp","button":0}]}]}' 2>/dev/null)
+      -d '{"actions":[{"type":"pointer","id":"mouse","parameters":{"pointerType":"mouse"},"actions":[{"type":"pointerMove","duration":100,"x":100,"y":120},{"type":"pointerDown","button":0},{"type":"pause","duration":50},{"type":"pointerUp","button":0}]}]}' 2>/dev/null)
     [ "$ACT_CODE" = "200" ] \
-      && record OK wda-actions "W3C actions (duration>=1) が HTTP 200" \
+      && record OK wda-actions "W3C actions (duration>1ms) が HTTP 200" \
       || record NG wda-actions "W3C actions が HTTP ${ACT_CODE}: $(head -c 200 "${SPIKE_OUT}/actions.json")"
 
     curl -s -m 10 -X DELETE "${BASE}/session/${SID}" >/dev/null 2>&1 || true
