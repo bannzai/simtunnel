@@ -1,0 +1,30 @@
+# macOS アプリ対応の go/no-go スパイク (issue #23)。使い捨て・検証専用。
+# macos-26 runner 上で TCC 突破 + screencapture + WebDriverAgentMac の /status・screenshot・click が
+# 通るかを実測する。secret を一切使わず、tailnet にも参加しない (すべて runner 内で完結)。
+# 結果は job summary の "SPIKE RESULT" で判断する。
+name: macos-app-spike
+
+on:
+  workflow_dispatch: {}
+  # feature ブランチ上でスパイクを自走させるための一時トリガー (secret 非依存のため fork PR の懸念に当たらない)。
+  # go/no-go が確定したら本 workflow ごと撤去する。
+  push:
+    branches:
+      - issue-23
+    paths:
+      - .github/workflows/macos-app-spike.yml
+      - runner/macos-app-spike.sh
+
+jobs:
+  spike:
+    runs-on: macos-26
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+
+      - name: スパイクを実行
+        run: ./runner/macos-app-spike.sh
