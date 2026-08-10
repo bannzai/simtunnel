@@ -10,7 +10,9 @@
 # 各チェックは失敗しても継続し、全証跡を集めてから overall を判定する (だから set -e は使わない)。
 set -uo pipefail
 
-MAC2_REF="${MAC2_REF:-v4.1.1}"
+# appium-mac2-driver は差し替え可能な tag ではなく immutable な commit SHA で固定する
+# (tag が別 commit に付け替えられると、別コードを clone して xcodebuild で実行しうる)。既定は v4.1.1 の commit。
+MAC2_REF="${MAC2_REF:-9ddfa08070e89753434d91418498804f7609c4c4}" # appium-mac2-driver v4.1.1
 WDA_PORT="${WDA_PORT:-10100}"
 WDA_HOST=127.0.0.1
 TARGET_BUNDLE_ID="${TARGET_BUNDLE_ID:-com.apple.calculator}"
@@ -51,29 +53,30 @@ dump_tcc() {
   sudo sqlite3 "$SYS_TCC" \
     "SELECT service, client, auth_value FROM access WHERE service IN ('kTCCServiceScreenCapture','kTCCServiceAccessibility');" 2>&1 || echo "(read failed)"
 }
+# スパイクの目的は「runner が最初から必要な grant を持っているか」の検証。TCC は読むだけで書き換えない
+# (UPDATE で allowed に倒すと、事前付与の有無や「追加付与なしでは動かない」回帰を検出できなくなる)。
 dump_tcc | tee "${SPIKE_OUT}/tcc-before.txt"
-if sudo sqlite3 "$SYS_TCC" \
-    "UPDATE access SET auth_value=2 WHERE service IN ('kTCCServiceScreenCapture','kTCCServiceAccessibility');" 2>"${WORK}/tcc.err"; then
-  record OK tcc-update "TCC.db の既存行を auth_value=2 (allowed) に更新できた"
+if grep -Fq "kTCCServiceAccessibility|com.apple.dt.Xcode-Helper|2" "${SPIKE_OUT}/tcc-before.txt"; then
+  record OK tcc-accessibility "kTCCServiceAccessibility が com.apple.dt.Xcode-Helper に事前付与済み (追加付与なし / XCTest 操作の前提)"
 else
-  record NG tcc-update "TCC.db 更新に失敗: $(tr '\n' ' ' <"${WORK}/tcc.err")"
-fi
-dump_tcc | tee "${SPIKE_OUT}/tcc-after.txt"
-if dump_tcc | grep -q "kTCCServiceAccessibility|com.apple.dt.Xcode-Helper|2"; then
-  record OK tcc-accessibility "kTCCServiceAccessibility が com.apple.dt.Xcode-Helper に付与済み (XCTest 操作の前提)"
-else
-  record NG tcc-accessibility "Xcode-Helper への accessibility 付与が確認できない"
+  record NG tcc-accessibility "Xcode-Helper への accessibility 事前付与が確認できない"
 fi
 
 # ---- 2. WebDriverAgentMac ビルド & 起動 ----
 section "WebDriverAgentMac build & launch"
 SRC="${WORK}/appium-mac2-driver"
-[ -d "$SRC" ] || git clone --depth 1 --branch "$MAC2_REF" https://github.com/appium/appium-mac2-driver.git "$SRC" 2>"${WORK}/clone.err"
+if [ ! -d "$SRC/.git" ]; then
+  # 指定 SHA を shallow に取得して detached checkout する (GitHub は SHA 指定 fetch を許可)
+  git init -q "$SRC" 2>"${WORK}/clone.err"
+  git -C "$SRC" remote add origin https://github.com/appium/appium-mac2-driver.git 2>>"${WORK}/clone.err"
+  git -C "$SRC" fetch -q --depth 1 origin "$MAC2_REF" 2>>"${WORK}/clone.err"
+  git -C "$SRC" checkout -q --detach FETCH_HEAD 2>>"${WORK}/clone.err"
+fi
 WDA_PROJ="${SRC}/WebDriverAgentMac/WebDriverAgentMac.xcodeproj"
 WDA_LOG="${WORK}/wdamac.log"
 WDA_ALIVE=0
 if [ -d "$WDA_PROJ" ]; then
-  record OK mac2-clone "appium-mac2-driver ${MAC2_REF} を取得した"
+  record OK mac2-clone "appium-mac2-driver を commit $(git -C "$SRC" rev-parse --short HEAD 2>/dev/null) で取得した"
   USE_PORT="$WDA_PORT" USE_HOST="$WDA_HOST" nohup xcodebuild \
     build-for-testing test-without-building \
     -project "$WDA_PROJ" -scheme WebDriverAgentRunner -destination "platform=macOS" \
@@ -120,19 +123,23 @@ if [ "$WDA_ALIVE" -eq 1 ]; then
     sleep 1
     wda_screenshot "${SPIKE_OUT}/wda-2-after-keys.png" >/dev/null
 
-    # source は xml / description のみ対応 (json は非対応)。xml を取得して結果を確認する。
-    curl -s -m 30 "${BASE}/session/${SID}/source?format=xml" -o "${SPIKE_OUT}/source.xml" 2>/dev/null
+    # source は xml / description のみ対応 (json は非対応)。WDA は XML を JSON エンベロープの .value に
+    # 入れて返すため、jq で取り出して純粋な XML を artifact に保存する。
+    curl -s -m 30 "${BASE}/session/${SID}/source?format=xml" -o "${SPIKE_OUT}/source.json" 2>/dev/null
+    jq -r '.value // empty' "${SPIKE_OUT}/source.json" >"${SPIKE_OUT}/source.xml" 2>/dev/null
     SRC_LEN=$(wc -c <"${SPIKE_OUT}/source.xml" 2>/dev/null | tr -d ' ')
     [ "${SRC_LEN:-0}" -gt 500 ] \
       && record OK wda-source "アプリのアクセシビリティツリー (xml) 取得 (${SRC_LEN} bytes)" \
       || record NG wda-source "source(xml) が短すぎる (${SRC_LEN} bytes)。artifact を確認"
 
-    if [ "$KEYS_CODE" = "200" ] && grep -q "56" "${SPIKE_OUT}/source.xml" 2>/dev/null; then
-      record OK wda-keys "キー入力で Calculator を操作できた (7*8= の結果 56 が source に出現)"
-    elif [ "$KEYS_CODE" = "200" ]; then
-      record NG wda-keys "キー入力は 200 だが source に結果 56 が無い。artifact の before/after を確認"
-    else
+    # 単純な "56" 一致は elementType="56" や座標 (x/width 等) にも当たるため、StaticText 要素の value 属性が
+    # 56 の時だけ操作成立とする (Calculator の表示 value には不可視の LTR マークが前置されるため [^"]* で吸収)。
+    if [ "$KEYS_CODE" != "200" ]; then
       record NG wda-keys "キー入力が HTTP ${KEYS_CODE}: $(head -c 200 "${SPIKE_OUT}/keys.json")"
+    elif grep -Eq 'XCUIElementTypeStaticText[^>]*value="[^"]*56"' "${SPIKE_OUT}/source.xml" 2>/dev/null; then
+      record OK wda-keys "キー入力で Calculator を操作できた (7*8= の結果 56 が StaticText の value に出現)"
+    else
+      record NG wda-keys "キー入力は 200 だが結果 56 の StaticText が無い。artifact の source.xml を確認"
     fi
 
     CLICK_CODE=$(curl -s -m 30 -o "${SPIKE_OUT}/click.json" -w '%{http_code}' -X POST "${BASE}/session/${SID}/wda/click" \
