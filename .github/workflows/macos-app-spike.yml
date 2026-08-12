@@ -1,0 +1,32 @@
+# macOS アプリ対応の go/no-go スパイク (issue #23)。検証専用の使い捨て workflow。
+# macos-26 runner 上で TCC 状態 + WebDriverAgentMac の /status・screenshot・キー入力・クリックが
+# 通るかを実測する。secret を一切使わず、tailnet にも参加しない (すべて runner 内で完結)。
+# 結果は job summary の "SPIKE RESULT" と artifact macos-app-spike で判断する。
+# 再検証したい時は Actions から手動 dispatch する (runner image / Xcode 更新時の回帰確認に使える)。
+name: macos-app-spike
+
+on:
+  workflow_dispatch: {}
+
+jobs:
+  spike:
+    runs-on: macos-26
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+
+      - name: スパイクを実行
+        run: ./runner/macos-app-spike.sh
+
+      # スクリーンショット等の証跡を回収して go/no-go を視覚的に確認する
+      - name: 証跡を artifact に上げる
+        if: always()
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
+        with:
+          name: macos-app-spike
+          path: spike-out
+          if-no-files-found: warn
