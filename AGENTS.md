@@ -6,7 +6,7 @@ GitHub Actions の macOS Runner 上で iOS Simulator + WebDriverAgent を起動�
 - 設計・採用理由・実装フェーズの SSOT は PROJECT.md。設計に関わる変更をしたら同じ変更で PROJECT.md も更新する
 
 ## 前提
-- public リポジトリで運用する（macOS Runner 無料）。tailnet 内の実 IP 等の環境固有情報を書かない（参照: PROJECT.md「リポジトリ公開に耐える安全性」）
+- public リポジトリで運用する（macOS Runner 無料）。tailnet 内の実 IP 等の環境固有情報は、リポジトリにも run のログ・サマリにも書かない（参照: PROJECT.md「リポジトリ公開に耐える安全性」）
 - Tailscale への認証は OIDC（workload identity federation）。GitHub Secrets は `TS_OIDC_CLIENT_ID` / `TS_OIDC_AUDIENCE`（識別子であり長期シークレットではない）
 - WDA は無認証のため、到達経路は tailnet 内に限定する。公開トンネル（cloudflared / ngrok 等）へ変更する場合は PROJECT.md「リポジトリ公開に耐える安全性」の再検討とセットで行う（参照: PROJECT.md 設計判断）
 - workflow のトリガーは `workflow_dispatch` のみとする（fork PR に Secrets を渡さないため。参照: PROJECT.md 設計判断）
