@@ -71,7 +71,7 @@ Tailscale は無料の Personal プラン（デバイス 100 台）で成立す�
 
 ### リポジトリ公開に耐える安全性
 
-リポジトリは public で運用する。tailnet 内の実 IP 等の環境固有情報はこのリポジトリに書かない。
+リポジトリは public で運用する。tailnet 内の実 IP 等の環境固有情報は、このリポジトリにも **run のログ・ステップサマリにも**書かない（後者は public リポジトリでは誰でも読める）。接続先は MagicDNS 名（`simtunnel-<session>`）で足りるため、runner 側が IP を出力する必要はない（`session.yml` のセッション情報出力と `bridge.sh` の両方が対象）。
 
 1. **公開エンドポイントゼロ**: WDA / MJPEG は tailnet 内からしか到達できない
 2. **トリガーは `workflow_dispatch` のみ**: 起動できるのは write 権限者だけ。fork からの PR には Secrets / OIDC トークンの権限が渡らない

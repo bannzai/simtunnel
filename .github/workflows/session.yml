@@ -231,13 +231,13 @@ jobs:
           SESSION: ${{ inputs.session }}
           SERVE_SIM: ${{ inputs.serve_sim }}
           SIMULATORS: ${{ inputs.simulators }}
+        # tailnet の実 IP は出力しない。public リポジトリでは run のログ・サマリを誰でも読めるため
+        # （参照: PROJECT.md「リポジトリ公開に耐える安全性」）。以降の URL は MagicDNS 名で足りる
         run: |
-          TS_IP="$(tailscale ip -4 | head -1)"
           {
             echo "## SimTunnel session ready"
             echo ""
             echo "- hostname: \`simtunnel-${SESSION}\`"
-            echo "- tailscale IP: \`${TS_IP}\`"
             for i in $(seq 0 $((SIMULATORS - 1))); do
               echo "- sim ${i}: WDA http://simtunnel-${SESSION}:$((8100 + i))/status / MJPEG http://simtunnel-${SESSION}:$((9100 + i))"
             done
