@@ -2,7 +2,7 @@
 # SimTunnel ローカル CLI。GHA 上の iOS Simulator セッションを管理する。
 #
 # 使い方:
-#   simtunnel up <session> [--device "iPhone 16"] [--duration 60] [--simulators 2] [--ref <branch>] [--app-zip-url <url>] [--bundle-id <id>] [--wait]
+#   simtunnel up <session> [--device "iPhone 16"] [--duration 60] [--simulators 2] [--ref <branch>] [--app-zip-url <url>] [--bundle-id <id>] [--wait] [--force]
 #   simtunnel down <session>
 #   simtunnel list
 #   simtunnel status <session> [--slot 1]
@@ -27,23 +27,109 @@ ts_bin() {
   fi
 }
 
-# tailnet に参加している simtunnel-<session> の IP を返す（未参加なら空）
+# tailnet に参加している simtunnel-<session> の IP を返す（未参加なら空）。
+# 終了済みセッションの node が offline のまま一覧に残ることがあるため、offline の peer は対象にしない
 session_ip() {
   local session=$1
-  "$(ts_bin)" status 2>/dev/null | awk -v h="simtunnel-${session}" '$2 == h {print $1; exit}'
+  "$(ts_bin)" status 2>/dev/null | awk -v h="simtunnel-${session}" '$2 == h && $5 != "offline" {print $1; exit}'
 }
 
-# session 名に一致する実行中/待機中の run ID を列挙する
-session_run_ids() {
+# session 名に一致する実行中/待機中の run を "runID<TAB>status<TAB>headBranch<TAB>headSha" で列挙する
+session_runs() {
   local session=$1
-  gh run list -R "$REPO" --workflow "$WORKFLOW" \
-    --json databaseId,displayTitle,status \
-    --jq ".[] | select(.status == \"in_progress\" or .status == \"queued\") | select(.displayTitle | startswith(\"session=${session} \")) | .databaseId"
+  gh run list -R "$REPO" --workflow "$WORKFLOW" -L 50 \
+    --json databaseId,displayTitle,status,headBranch,headSha \
+    --jq ".[] | select(.status != \"completed\") | select(.displayTitle | startswith(\"session=${session} \")) | [.databaseId, .status, .headBranch, .headSha] | @tsv"
+}
+
+# simtunnel-<session> の node 登録が tailnet に残っているか (offline 含む)。
+# 登録が残ったまま同名 hostname で参加すると後発 node に -1 が付き、MagicDNS 名が旧 node を
+# 指し続けるため (PROJECT.md「repo を跨いだ同名セッション」参照)、hostname 再利用の可否はこちらで判定する
+session_node_registered() {
+  local session=$1
+  "$(ts_bin)" status 2>/dev/null | awk -v h="simtunnel-${session}" '$2 == h {found=1; exit} END {exit !found}'
+}
+
+# ref (branch / tag) の最新コミット SHA を返す。解決できなければ空。
+# API rate limit の影響を受けない git ls-remote を優先し、git で認証できない repo は gh api で補う。
+# annotated tag は tag オブジェクトではなく peel 済み (^{}) のコミット SHA を採用する (run の headSha と比較するため)
+resolve_ref_sha() {
+  local ref=$1
+  local sha
+  sha=$(GIT_TERMINAL_PROMPT=0 git ls-remote "https://github.com/${REPO}.git" \
+      "refs/heads/${ref}" "refs/tags/${ref}" "refs/tags/${ref}^{}" 2>/dev/null \
+    | awk '$2 ~ /^refs\/heads\// {head=$1}
+           $2 ~ /\^\{\}$/ {peeled=$1}
+           $2 ~ /^refs\/tags\// && $2 !~ /\^\{\}$/ {tag=$1}
+           END {if (head) print head; else if (peeled) print peeled; else if (tag) print tag}' || true)
+  if [ -z "$sha" ]; then
+    sha=$(gh api "repos/${REPO}/commits/${ref}" --jq .sha 2>/dev/null) || sha=""
+  fi
+  printf '%s' "$sha"
+}
+
+# ref 上に workflow_dispatch 対応の対象 workflow ファイルが存在するか
+# (gh workflow run --ref は ref 上の workflow 定義を使うため、無い ref への dispatch は失敗する)。
+# raw.githubusercontent.com は API rate limit と別枠のため優先し、取れない repo は gh api で補う
+workflow_dispatchable_on_ref() {
+  local ref=$1
+  local content
+  content=$(curl -sfL -m 10 "https://raw.githubusercontent.com/${REPO}/${ref}/.github/workflows/${WORKFLOW}" 2>/dev/null || true)
+  if [ -z "$content" ]; then
+    content=$(gh api "repos/${REPO}/contents/.github/workflows/${WORKFLOW}?ref=${ref}" --jq .content 2>/dev/null | tr -d '\n' | base64 -d 2>/dev/null || true)
+  fi
+  [ -n "$content" ] && grep -q "workflow_dispatch" <<<"$content"
+}
+
+# 指定 run 群が terminal state になるまで待つ (gh run cancel はキャンセル要求を送るだけで終了を待たないため)
+wait_runs_terminal() {
+  local id st
+  for id in "$@"; do
+    st=""
+    for _ in $(seq 1 36); do
+      st=$(gh run view "$id" -R "$REPO" --json status --jq .status 2>/dev/null) || st=""
+      [ "$st" = "completed" ] && break
+      sleep 5
+    done
+    if [ "$st" != "completed" ]; then
+      echo "run ${id} が 3 分待っても終了しない。gh run view ${id} -R ${REPO} で確認して" >&2
+      return 1
+    fi
+  done
+}
+
+# simtunnel-<session> の node 登録 (offline 含む) が tailnet から消えるまで待つ
+wait_node_unregistered() {
+  local session=$1
+  session_node_registered "$session" || return 0
+  echo "旧 node simtunnel-${session} の登録が tailnet から消えるのを待機中..."
+  for _ in $(seq 1 24); do
+    sleep 5
+    session_node_registered "$session" || return 0
+  done
+  echo "2 分待っても simtunnel-${session} の登録が tailnet に残っている。時間をおいて再実行して" >&2
+  return 1
+}
+
+cancel_run_ids() {
+  local id
+  for id in "$@"; do
+    gh run cancel "$id" -R "$REPO"
+    echo "cancelled: run ${id}"
+  done
+}
+
+# tailnet に node はあるのに $REPO 側に run が見つからない時の案内。
+# SIMTUNNEL_REPO の指定漏れで別 repo を見ている可能性が高いため、冪等成功にせずエラーにする
+warn_repo_mismatch() {
+  local session=$1
+  echo "simtunnel-${session} は tailnet に存在するが、${REPO} に対象 run が見つからない" >&2
+  echo "SIMTUNNEL_REPO の指定漏れの可能性。確認: gh run list -R <owner>/<repo> -w ${WORKFLOW}" >&2
 }
 
 cmd_up() {
   local session=$1; shift
-  local device="iPhone 17" duration=60 simulators="" ref="" app_zip_url="" bundle_id="" wait=0
+  local device="iPhone 17" duration=60 simulators="" ref="" app_zip_url="" bundle_id="" wait=0 force=0
   while [ $# -gt 0 ]; do
     case "$1" in
       --device) device=$2; shift 2 ;;
@@ -53,18 +139,66 @@ cmd_up() {
       --app-zip-url) app_zip_url=$2; shift 2 ;;
       --bundle-id) bundle_id=$2; shift 2 ;;
       --wait) wait=1; shift ;;
+      --force) force=1; shift ;;
       *) echo "不明なオプション: $1" >&2; exit 1 ;;
     esac
   done
 
-  if [ -n "$(session_ip "$session")" ]; then
-    echo "セッション ${session} はすでに tailnet に存在する（冪等: 何もしない）"
-    return 0
+  # --ref が解決できないまま既存 run をキャンセルするとセッションだけが失われるため、破壊的操作の前に解決する
+  local want_sha=""
+  if [ -n "$ref" ]; then
+    want_sha=$(resolve_ref_sha "$ref")
+    if [ -z "$want_sha" ]; then
+      echo "--ref ${ref} を ${REPO} の branch / tag として解決できない" >&2
+      return 1
+    fi
   fi
-  if [ -n "$(session_run_ids "$session")" ]; then
-    echo "セッション ${session} の run はすでに起動中（準備中の可能性。simtunnel status ${session} で確認）"
-    return 0
+
+  local ip runs
+  ip=$(session_ip "$session")
+  runs=$(session_runs "$session")
+  if [ -n "$ip" ] || [ -n "$runs" ]; then
+    if [ -z "$runs" ]; then
+      warn_repo_mismatch "$session"
+      return 1
+    fi
+    # 既存セッションがどのコミットで動いているかを常に表示し、古いバイナリの取り違えに気付けるようにする
+    local id status branch sha
+    while IFS=$'\t' read -r id status branch sha; do
+      echo "既存セッション ${session}: run ${id} (${status} branch=${branch} commit=${sha:0:7})"
+    done <<<"$runs"
+
+    if [ "$force" -eq 1 ]; then
+      # ref 上に dispatch できる workflow が無いままキャンセルすると、再 dispatch が失敗してセッションだけが失われる
+      if [ -n "$ref" ] && ! workflow_dispatchable_on_ref "$ref"; then
+        echo "--ref ${ref} に workflow_dispatch 対応の ${WORKFLOW} が見つからない。既存 run はキャンセルしない" >&2
+        return 1
+      fi
+      # shellcheck disable=SC2046
+      cancel_run_ids $(cut -f1 <<<"$runs")
+      # shellcheck disable=SC2046
+      wait_runs_terminal $(cut -f1 <<<"$runs") || return 1
+    else
+      if [ -n "$ref" ]; then
+        # queued と in_progress の run が共存し得るため (concurrency は cancel-in-progress: false)、
+        # 全 run の commit が ref と一致する時だけ既存セッションを使う
+        local mismatch_sha
+        mismatch_sha=$(awk -F'\t' -v want="$want_sha" '$4 != want {print $4; exit}' <<<"$runs")
+        if [ -n "$mismatch_sha" ]; then
+          echo "既存セッションに --ref ${ref} の最新コミット (${want_sha:0:7}) と別のコミット (${mismatch_sha:0:7}) の run が含まれる。作り直すには --force を付ける" >&2
+          return 1
+        fi
+      fi
+      echo "セッション ${session} はすでに存在する（冪等: dispatch しない。作り直すには --force）"
+      if [ "$wait" -eq 1 ]; then
+        cmd_wait "$session"
+      fi
+      return 0
+    fi
   fi
+
+  # 同名 hostname の node 登録 (offline 含む) が残ったまま dispatch すると MagicDNS 名が競合するため、消えるのを待つ
+  wait_node_unregistered "$session" || return 1
 
   # workflow 側で未定義の input を送ると dispatch 自体が拒否されるため、
   # 空の任意 input は送らない（app_zip_url 等を宣言しない薄い caller workflow に対応）
@@ -89,7 +223,7 @@ cmd_wait() {
   for _ in $(seq 1 80); do
     local ip
     ip=$(session_ip "$session")
-    if [ -n "$ip" ] && curl -s -m 3 "http://${ip}:8100/status" >/dev/null 2>&1; then
+    if [ -n "$ip" ] && [ "$(curl -s -m 3 -o /dev/null -w '%{http_code}' "http://${ip}:8100/status" 2>/dev/null)" = "200" ]; then
       echo "ready: http://simtunnel-${session}:8100 (${ip})"
       return 0
     fi
@@ -102,16 +236,17 @@ cmd_wait() {
 cmd_down() {
   local session=$1
   local ids
-  ids=$(session_run_ids "$session")
+  ids=$(session_runs "$session" | cut -f1)
   if [ -z "$ids" ]; then
-    echo "セッション ${session} の実行中 run はない（冪等: 何もしない）"
+    if [ -n "$(session_ip "$session")" ]; then
+      warn_repo_mismatch "$session"
+      return 1
+    fi
+    echo "セッション ${session} の実行中 run はない（冪等: 何もしない。対象 repo: ${REPO}）"
     return 0
   fi
-  local id
-  for id in $ids; do
-    gh run cancel "$id" -R "$REPO"
-    echo "cancelled: run ${id}"
-  done
+  # shellcheck disable=SC2086
+  cancel_run_ids $ids
 }
 
 cmd_list() {
@@ -193,8 +328,18 @@ cmd_mcp_config() {
   command -v jq >/dev/null 2>&1 || { echo "jq が必要（brew install jq）" >&2; return 1; }
   [ -d "$dir" ] || { echo "ディレクトリが存在しない: $dir" >&2; return 1; }
 
-  local repo_root file existing merged
-  repo_root=$(cd "$(dirname "$0")/.." && pwd)
+  local repo_root file existing merged script_path link
+  # ~/bin/simtunnel 等の symlink 経由で起動しても実体のリポジトリを repo_root にする
+  # （dirname "$0" だと symlink の置き場所になり、mcp/index.mjs のパスが壊れる）
+  script_path=$0
+  while [ -L "$script_path" ]; do
+    link=$(readlink "$script_path")
+    case "$link" in
+      /*) script_path=$link ;;
+      *) script_path=$(dirname "$script_path")/$link ;;
+    esac
+  done
+  repo_root=$(cd "$(dirname "$script_path")/.." && pwd)
   file="${dir%/}/.mcp.json"
   existing="{}"
   if [ -f "$file" ]; then
