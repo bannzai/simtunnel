@@ -168,13 +168,13 @@ jobs:
       - name: セッション情報を出力
         env:
           SESSION: ${{ inputs.session }}
+        # tailnet の実 IP は出力しない。public リポジトリでは run のログ・サマリを誰でも読めるため
+        # （参照: PROJECT.md「リポジトリ公開に耐える安全性」）。以降の URL は MagicDNS 名で足りる
         run: |
-          TS_IP="$(tailscale ip -4 | head -1)"
           {
             echo "## SimTunnel macOS session ready"
             echo ""
             echo "- hostname: \`simtunnel-${SESSION}\`"
-            echo "- tailscale IP: \`${TS_IP}\`"
             echo "- WDA-mac: http://simtunnel-${SESSION}:${WDA_PORT}/status"
             echo "- bundle id: \`${MAC_BUNDLE_ID}\`"
             echo ""
