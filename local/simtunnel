@@ -193,8 +193,18 @@ cmd_mcp_config() {
   command -v jq >/dev/null 2>&1 || { echo "jq が必要（brew install jq）" >&2; return 1; }
   [ -d "$dir" ] || { echo "ディレクトリが存在しない: $dir" >&2; return 1; }
 
-  local repo_root file existing merged
-  repo_root=$(cd "$(dirname "$0")/.." && pwd)
+  local repo_root file existing merged script_path link
+  # ~/bin/simtunnel 等の symlink 経由で起動しても実体のリポジトリを repo_root にする
+  # （dirname "$0" だと symlink の置き場所になり、mcp/index.mjs のパスが壊れる）
+  script_path=$0
+  while [ -L "$script_path" ]; do
+    link=$(readlink "$script_path")
+    case "$link" in
+      /*) script_path=$link ;;
+      *) script_path=$(dirname "$script_path")/$link ;;
+    esac
+  done
+  repo_root=$(cd "$(dirname "$script_path")/.." && pwd)
   file="${dir%/}/.mcp.json"
   existing="{}"
   if [ -f "$file" ]; then
