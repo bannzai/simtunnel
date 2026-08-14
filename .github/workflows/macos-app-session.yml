@@ -1,0 +1,49 @@
+# macOS アプリセッションを張る workflow（simtunnel 自身用の workflow_dispatch ラッパー）。
+# 実体は macos-session.yml（reusable workflow）。他リポジトリからの利用は
+# PROJECT.md「macOS アプリの操作（WebDriverAgentMac）」参照。
+# 起動例:
+#   gh workflow run macos-app-session.yml -R bannzai/simtunnel -f session=dev-mac -f duration_minutes=30
+# 停止:
+#   gh run cancel <run-id> -R bannzai/simtunnel
+name: macos-app-session
+# run-name は local/simtunnel CLI が run を特定するキー（session=<name> で始める必要がある）
+run-name: "session=${{ inputs.session }} runner=${{ inputs.runner }}"
+
+on:
+  workflow_dispatch:
+    inputs:
+      session:
+        description: "セッション名。tailnet ホスト名 simtunnel-<session> になる（小文字英数字とハイフンのみ）"
+        required: true
+        default: dev-mac
+      # local/simtunnel up は device を常に送るため宣言必須（macOS では未使用）
+      device:
+        description: "（macOS では未使用。local CLI 互換のため）"
+        required: false
+        default: "-"
+      duration_minutes:
+        description: "セッション維持時間（分）"
+        required: true
+        default: "60"
+      runner:
+        description: "実行する macOS runner ラベル（macos-15 / macos-26）"
+        required: false
+        default: macos-15
+
+jobs:
+  session:
+    # id-token: write が必要なのは reusable workflow を呼ぶこの job だけのため、job 単位で最小権限にする
+    permissions:
+      id-token: write # Tailscale の OIDC (workload identity federation) 認証に必要
+      contents: read
+    uses: ./.github/workflows/macos-session.yml
+    with:
+      session: ${{ inputs.session }}
+      runner: ${{ inputs.runner }}
+      duration_minutes: ${{ inputs.duration_minutes }}
+      # 本ラッパーは simtunnel 自身の self-test 用のため常にサンプルアプリを使う。
+      # 実アプリは各 repo の caller workflow から build_project 指定で macos-session.yml を呼ぶ
+      sample_app: "true"
+    secrets:
+      TS_OIDC_CLIENT_ID: ${{ secrets.TS_OIDC_CLIENT_ID }}
+      TS_OIDC_AUDIENCE: ${{ secrets.TS_OIDC_AUDIENCE }}

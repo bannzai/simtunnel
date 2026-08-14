@@ -3,4 +3,5 @@ tmp/
 var/
 node_modules/
 CLAUDE.local.md
+macOSProject/build/
 .env*

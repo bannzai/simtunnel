@@ -1,0 +1,190 @@
+# macOS アプリを runner の GUI セッション上で起動し、WebDriverAgentMac + Tailscale で
+# ローカルから操作・スクリーンショット取得できるようにする reusable workflow。
+# iOS 版 session.yml の macOS 対応版。操作レイヤーは WDA-mac (appium-mac2-driver 同梱)。
+# 他リポジトリからの呼び方は PROJECT.md「macOS アプリの操作（WebDriverAgentMac）」参照。
+# simtunnel 自身は macos-app-session.yml（workflow_dispatch ラッパー）経由で呼ぶ。
+name: macos-session
+
+on:
+  workflow_call:
+    inputs:
+      session:
+        description: "セッション名。tailnet ホスト名 simtunnel-<session> になる（小文字英数字とハイフンのみ）"
+        type: string
+        required: true
+      runner:
+        description: "実行する macOS runner ラベル（macos-15 / macos-26）"
+        type: string
+        required: false
+        default: macos-15
+      duration_minutes:
+        description: "セッション維持時間（分）"
+        type: string
+        required: false
+        default: "60"
+      sample_app:
+        description: "リポジトリ内サンプル (macOSProject/MacSample.app) をビルドして起動する"
+        type: string
+        required: false
+        default: "false"
+      build_project:
+        description: "runner 上でビルドする .xcodeproj / .xcworkspace のパス（caller リポジトリのルート相対。sample_app=false 時に使う）"
+        type: string
+        required: false
+        default: ""
+      build_scheme:
+        description: "build_project をビルドする scheme（build_project 指定時は必須）"
+        type: string
+        required: false
+        default: ""
+      build_configuration:
+        description: "build_project をビルドする configuration"
+        type: string
+        required: false
+        default: Debug
+    secrets:
+      TS_OIDC_CLIENT_ID:
+        required: true
+      TS_OIDC_AUDIENCE:
+        required: true
+
+env:
+  # WebDriverAgentMac のバージョン固定（ビルドキャッシュのキーにもなる）
+  WDA_MAC_REF: v4.1.1
+  # WDA-mac は 1 GUI セッションにつき 1 ポート
+  WDA_PORT: "8100"
+
+jobs:
+  session:
+    runs-on: ${{ inputs.runner }}
+    # 各 step が個別に時間制限を持つため、これは暴走時の最終防衛線
+    timeout-minutes: 360
+    # caller が付与した権限を必要最小限まで絞る（Tailscale の OIDC 認証に id-token: write が必要）
+    permissions:
+      id-token: write
+      contents: read
+    # 同名セッションの同時起動を防ぐ（tailnet ホスト名 simtunnel-<session> の衝突防止）。
+    # iOS 版 session.yml と同じグループ名を共有し、同一 repo で iOS/macOS を同名セッションで
+    # 準備中にしても直列化されるようにする（tailnet ホスト名は iOS/macOS 共通のため）。
+    # グループは caller リポジトリ単位のため、repo を跨いだ同名セッションは防げない
+    concurrency:
+      group: simulator-session-${{ inputs.session }}
+      cancel-in-progress: false
+    steps:
+      - name: 入力を検証
+        env:
+          SESSION: ${{ inputs.session }}
+          SAMPLE_APP: ${{ inputs.sample_app }}
+          BUILD_PROJECT: ${{ inputs.build_project }}
+          BUILD_SCHEME: ${{ inputs.build_scheme }}
+          JOB_WORKFLOW_SHA: ${{ job.workflow_sha }}
+        run: |
+          [[ "$SESSION" =~ ^[a-z0-9-]+$ ]] || {
+            echo "session は小文字英数字とハイフンのみ許可: $SESSION" >&2
+            exit 1
+          }
+          if [ "$SAMPLE_APP" != "true" ]; then
+            if [ -z "$BUILD_PROJECT" ]; then
+              echo "sample_app=false の場合は build_project が必須" >&2
+              exit 1
+            fi
+            if [ -z "$BUILD_SCHEME" ]; then
+              echo "build_project 指定時は build_scheme も必須" >&2
+              exit 1
+            fi
+          fi
+          # 空だと simtunnel の checkout がデフォルトブランチに落ちて workflow と scripts の版がずれる
+          [ -n "$JOB_WORKFLOW_SHA" ] || {
+            echo "job.workflow_sha が空。runner スクリプトの版を固定できないため中断" >&2
+            exit 1
+          }
+
+      # タグは可変で差し替えられうるため commit SHA で固定する（参照: PROJECT.md「リポジトリ公開に耐える安全性」）
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+
+      # runner スクリプトとサンプルアプリは caller リポジトリには無いため、この workflow ファイルと
+      # 同一 repo・同一 commit を取得する（reusable workflow では job.workflow_sha が呼ばれた版を指す）
+      - name: simtunnel（runner スクリプト）を checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: simtunnel
+          persist-credentials: false
+
+      - name: Xcode バージョンを取得（キャッシュキー用）
+        id: xcode
+        run: echo "version=$(xcodebuild -version | tr '\n' '_' | tr ' ' '.')" >> "$GITHUB_OUTPUT"
+
+      - name: WDA-mac ビルドキャッシュを復元
+        id: wda-cache
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: wda-mac-dd/Build/Products
+          key: wda-mac-${{ env.WDA_MAC_REF }}-${{ runner.arch }}-${{ steps.xcode.outputs.version }}
+
+      - name: アプリをビルド
+        timeout-minutes: 30
+        env:
+          SAMPLE_APP: ${{ inputs.sample_app }}
+          BUILD_PROJECT: ${{ inputs.build_project }}
+          BUILD_SCHEME: ${{ inputs.build_scheme }}
+          BUILD_CONFIGURATION: ${{ inputs.build_configuration }}
+        run: ./simtunnel/runner/build-macos-app.sh
+
+      - name: アプリを LaunchServices に登録して起動
+        timeout-minutes: 5
+        run: ./simtunnel/runner/launch-macos-app.sh
+
+      - name: WebDriverAgentMac を起動
+        timeout-minutes: 30
+        run: ./simtunnel/runner/start-wda-mac.sh "$WDA_PORT"
+
+      # キャッシュミス時のみ保存する。ジョブは down で cancel されるため、
+      # post step 任せにせずビルド直後に明示的に保存する
+      - name: WDA-mac ビルドキャッシュを保存
+        if: steps.wda-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: wda-mac-dd/Build/Products
+          key: wda-mac-${{ env.WDA_MAC_REF }}-${{ runner.arch }}-${{ steps.xcode.outputs.version }}
+
+      # ここまで（WDA-mac がローカルで応答するまで）tailnet に参加しない。
+      # 参照: PROJECT.md「リポジトリ公開に耐える安全性」
+      - name: Tailscale に参加
+        uses: tailscale/github-action@306e68a486fd2350f2bfc3b19fcd143891a4a2d8 # v4.1.2
+        with:
+          oauth-client-id: ${{ secrets.TS_OIDC_CLIENT_ID }}
+          audience: ${{ secrets.TS_OIDC_AUDIENCE }}
+          tags: tag:ci
+          hostname: simtunnel-${{ inputs.session }}
+
+      - name: tailnet へブリッジ
+        timeout-minutes: 10
+        run: ./simtunnel/runner/bridge.sh "$WDA_PORT"
+
+      - name: セッション情報を出力
+        env:
+          SESSION: ${{ inputs.session }}
+        # tailnet の実 IP は出力しない。public リポジトリでは run のログ・サマリを誰でも読めるため
+        # （参照: PROJECT.md「リポジトリ公開に耐える安全性」）。以降の URL は MagicDNS 名で足りる
+        run: |
+          {
+            echo "## SimTunnel macOS session ready"
+            echo ""
+            echo "- hostname: \`simtunnel-${SESSION}\`"
+            echo "- WDA-mac: http://simtunnel-${SESSION}:${WDA_PORT}/status"
+            echo "- bundle id: \`${MAC_BUNDLE_ID}\`"
+            echo ""
+            echo "セッション作成: POST http://simtunnel-${SESSION}:${WDA_PORT}/session"
+            echo '```json'
+            echo "{\"capabilities\":{\"alwaysMatch\":{\"appium:bundleId\":\"${MAC_BUNDLE_ID}\"},\"firstMatch\":[{}]}}"
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: セッションを維持
+        env:
+          DURATION: ${{ inputs.duration_minutes }}
+        run: ./simtunnel/runner/keepalive.sh "$DURATION" "$WDA_PORT"
