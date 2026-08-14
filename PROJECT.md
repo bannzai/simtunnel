@@ -75,7 +75,7 @@ Tailscale は無料の Personal プラン（デバイス 100 台）で成立す�
 
 1. **公開エンドポイントゼロ**: WDA / MJPEG は tailnet 内からしか到達できない
 2. **トリガーは `workflow_dispatch` のみ**: 起動できるのは write 権限者だけ。fork からの PR には Secrets / OIDC トークンの権限が渡らない
-3. **長期シークレットを持たない（OIDC / workload identity federation）**: Tailscale への認証は、GitHub が workflow に発行する短命の OIDC トークンで行う。subject が `repo:bannzai/simtunnel:*` に一致する workflow しか認証できず、盗まれて困る静的シークレットがそもそも存在しない（Secrets の `TS_OIDC_CLIENT_ID` / `TS_OIDC_AUDIENCE` は識別子であり秘密情報ではない）
+3. **長期シークレットを持たない（OIDC / workload identity federation）**: Tailscale への認証は、GitHub が workflow に発行する短命の OIDC トークンで行う。subject がこのリポジトリを指す trust credential の Subject（形式は「Tailscale セットアップ手順」参照）に一致する workflow しか認証できず、盗まれて困る静的シークレットがそもそも存在しない（Secrets の `TS_OIDC_CLIENT_ID` / `TS_OIDC_AUDIENCE` は識別子であり秘密情報ではない）
 4. **Tailscale ACL で双方向を絞る**: 自分のデバイス → `tag:ci` の 8100/9100 のみ許可。`tag:ci` からの発信は全拒否。tailnet 内のローカルデバイスは SSH 等のサービスを listen している可能性がある前提で設計する（Tailscale が与えるのはネットワーク到達性だけでログイン権限ではないが、listen 中のサービスは攻撃面になる）。万一 runner が汚染されても tailnet 内の他デバイスへ発信できないことをこのルールで保証する
 
 ```jsonc
@@ -156,7 +156,7 @@ GitHub の Additional Product Terms は、GitHub-hosted runner の用途を「wo
 - `session.yml` を reusable workflow（`workflow_call`）とし、各アプリ repo からは薄い caller workflow で呼ぶ。simtunnel 自身は `simulator-session.yml`（`workflow_dispatch` ラッパー）経由で呼ぶ
 - **simtunnel は public のまま維持する**。private 化すると (a) public repo から private repo の reusable workflow は呼べない（https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/enabling-features-for-your-repository/managing-github-actions-settings-for-a-repository ）、(b) runner スクリプトの checkout に PAT が必要になる、(c) simtunnel 自身の検証 run が月 200 macOS 分に制限される
 - アプリ repo も public にする（macOS runner 無料のため）。public 化前に履歴へのシークレット混入が無いことを点検する
-- OIDC token の subject は **caller repo 基準**になるため、アプリ repo 側に Secrets（`TS_OIDC_CLIENT_ID` / `TS_OIDC_AUDIENCE`）の登録が必要。trust credential は **subject ワイルドカード（`repo:<owner>/*` 形式）が使える**（検証済み 2026-07-06。Tailscale docs の「Values can contain an `*`」のとおり動作）ため、1 credential + 同一 Secrets 値で複数 repo をカバーできる。トレードオフ: オーナー配下の任意 repo の workflow が tag:ci の auth key を発行できるようになる（tag:ci は ACL で発信全拒否のため影響は限定的）。repo 単位に絞りたい場合は Subject `repo:<owner>/<repo>:*` で個別発行する（「Tailscale セットアップ手順」の subject 読み替え）
+- OIDC token の subject は **caller repo 基準**になるため、アプリ repo 側に Secrets（`TS_OIDC_CLIENT_ID` / `TS_OIDC_AUDIENCE`）の登録が必要。trust credential は **subject ワイルドカード（`repo:<owner>@<owner_id>/*` 形式）が使える**（旧形式 `repo:<owner>/*` で 2026-07-06、現行形式で 2026-08-13 に検証済み。Tailscale docs の「Values can contain an `*`」のとおり動作）ため、1 credential + 同一 Secrets 値で複数 repo をカバーできる。トレードオフ: オーナー配下の任意 repo の workflow が tag:ci の auth key を発行できるようになる（tag:ci は ACL で発信全拒否のため影響は限定的）。repo 単位に絞りたい場合は Subject `repo:<owner>@<owner_id>/<repo>@<repo_id>:*` で個別発行する（subject の形式は「Tailscale セットアップ手順」参照）
 - Actions cache は repo 単位のため、アプリ repo ごとに初回 run は WDA ビルドが走る（2 回目以降はキャッシュヒット）
 - ビルド対象は input（`build_project` / `build_scheme` / `build_configuration`）で渡す。`build_project` は caller repo ルート相対の .xcodeproj / .xcworkspace パス。bundle id はビルド成果物から自動取得する
 
@@ -377,9 +377,16 @@ JSON editor に切り替え、ポリシーファイル全体を上記「リポ�
 https://login.tailscale.com/admin/settings/trust-credentials
 
 1. **New credential** → credential type で **OpenID Connect** を選択
-2. Issuer: **GitHub** / Subject: `repo:bannzai/simtunnel:*`（複数 repo をカバーする場合はワイルドカード `repo:<owner>/*` も可。検証済み。トレードオフは「各アプリ repo での実行」参照）
+2. Issuer: **GitHub** / Subject: GitHub が OIDC token で送る subject に一致する値を入れる。現行形式（2026-08-13 実測）は owner とリポジトリ名それぞれに `@<ID>` が付く `repo:<owner>@<owner_id>/<repo>@<repo_id>:*`（複数 repo をカバーする場合はワイルドカード `repo:<owner>@<owner_id>/*` も可。検証済み。トレードオフは「各アプリ repo での実行」参照）。owner_id は `gh api user --jq .id`（org は `gh api orgs/<org> --jq .id`）、repo_id は `gh api repos/<owner>/<repo> --jq .id` で取得できる
 3. Scopes: **Custom scopes** のまま一覧を下にスクロールし、**Keys > Auth Keys** の **Write** にチェック → タグは **tag:ci** を選択
 4. 発行された **Client ID** と **Audience** を控える（OAuth client と違い secret は存在しない）
+
+subject の形式は GitHub 側の変更で変わり得る（実例: 2026-08-13 に `repo:<owner>/<repo>:...` から `@<ID>` 付きの現行形式へ変わり、旧形式の Subject では認証エラーになった。issue #34）。形式が合っているかは推測せず、**admin console の credential 画面に表示される「Received "..." from issuer」の実値を正として Subject を合わせる**。
+
+認証エラーの切り分け:
+
+- **401**（`failed to exchange JWT for access token: token exchange failed with status 401: {"message":"federated identity invalid"}`）= credential 不一致。Subject を確認する
+- **403** Unauthorized = Subject は一致したが scope/tag 不足、または subject の再検証失敗。admin console の credential 画面に「Cannot validate subject」と issuer から届いた実際の subject（`Received "..." from issuer`）が表示されるので、その実値に合わせる
 
 ### 3. GitHub Secrets への登録
 
