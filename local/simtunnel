@@ -34,12 +34,68 @@ session_ip() {
   "$(ts_bin)" status 2>/dev/null | awk -v h="simtunnel-${session}" '$2 == h && $5 != "offline" {print $1; exit}'
 }
 
-# session 名に一致する実行中/待機中の run を "runID<TAB>headBranch<TAB>headSha" で列挙する
+# session 名に一致する実行中/待機中の run を "runID<TAB>status<TAB>headBranch<TAB>headSha" で列挙する
 session_runs() {
   local session=$1
   gh run list -R "$REPO" --workflow "$WORKFLOW" -L 50 \
     --json databaseId,displayTitle,status,headBranch,headSha \
-    --jq ".[] | select(.status == \"in_progress\" or .status == \"queued\") | select(.displayTitle | startswith(\"session=${session} \")) | [.databaseId, .headBranch, .headSha] | @tsv"
+    --jq ".[] | select(.status != \"completed\") | select(.displayTitle | startswith(\"session=${session} \")) | [.databaseId, .status, .headBranch, .headSha] | @tsv"
+}
+
+# simtunnel-<session> の node 登録が tailnet に残っているか (offline 含む)。
+# 登録が残ったまま同名 hostname で参加すると後発 node に -1 が付き、MagicDNS 名が旧 node を
+# 指し続けるため (PROJECT.md「repo を跨いだ同名セッション」参照)、hostname 再利用の可否はこちらで判定する
+session_node_registered() {
+  local session=$1
+  "$(ts_bin)" status 2>/dev/null | awk -v h="simtunnel-${session}" '$2 == h {found=1; exit} END {exit !found}'
+}
+
+# ref (branch / tag) の最新コミット SHA を返す。解決できなければ空。
+# API rate limit の影響を受けない git ls-remote を優先し、git で認証できない repo は gh api で補う。
+# annotated tag は tag オブジェクトではなく peel 済み (^{}) のコミット SHA を採用する (run の headSha と比較するため)
+resolve_ref_sha() {
+  local ref=$1
+  local sha
+  sha=$(GIT_TERMINAL_PROMPT=0 git ls-remote "https://github.com/${REPO}.git" \
+      "refs/heads/${ref}" "refs/tags/${ref}" "refs/tags/${ref}^{}" 2>/dev/null \
+    | awk '$2 ~ /^refs\/heads\// {head=$1}
+           $2 ~ /\^\{\}$/ {peeled=$1}
+           $2 ~ /^refs\/tags\// && $2 !~ /\^\{\}$/ {tag=$1}
+           END {if (head) print head; else if (peeled) print peeled; else if (tag) print tag}' || true)
+  if [ -z "$sha" ]; then
+    sha=$(gh api "repos/${REPO}/commits/${ref}" --jq .sha 2>/dev/null) || sha=""
+  fi
+  printf '%s' "$sha"
+}
+
+# 指定 run 群が terminal state になるまで待つ (gh run cancel はキャンセル要求を送るだけで終了を待たないため)
+wait_runs_terminal() {
+  local id st
+  for id in "$@"; do
+    st=""
+    for _ in $(seq 1 36); do
+      st=$(gh run view "$id" -R "$REPO" --json status --jq .status 2>/dev/null) || st=""
+      [ "$st" = "completed" ] && break
+      sleep 5
+    done
+    if [ "$st" != "completed" ]; then
+      echo "run ${id} が 3 分待っても終了しない。gh run view ${id} -R ${REPO} で確認して" >&2
+      return 1
+    fi
+  done
+}
+
+# simtunnel-<session> の node 登録 (offline 含む) が tailnet から消えるまで待つ
+wait_node_unregistered() {
+  local session=$1
+  session_node_registered "$session" || return 0
+  echo "旧 node simtunnel-${session} の登録が tailnet から消えるのを待機中..."
+  for _ in $(seq 1 24); do
+    sleep 5
+    session_node_registered "$session" || return 0
+  done
+  echo "2 分待っても simtunnel-${session} の登録が tailnet に残っている。時間をおいて再実行して" >&2
+  return 1
 }
 
 cancel_run_ids() {
@@ -75,6 +131,16 @@ cmd_up() {
     esac
   done
 
+  # --ref が解決できないまま既存 run をキャンセルするとセッションだけが失われるため、破壊的操作の前に解決する
+  local want_sha=""
+  if [ -n "$ref" ]; then
+    want_sha=$(resolve_ref_sha "$ref")
+    if [ -z "$want_sha" ]; then
+      echo "--ref ${ref} を ${REPO} の branch / tag として解決できない" >&2
+      return 1
+    fi
+  fi
+
   local ip runs
   ip=$(session_ip "$session")
   runs=$(session_runs "$session")
@@ -84,41 +150,24 @@ cmd_up() {
       return 1
     fi
     # 既存セッションがどのコミットで動いているかを常に表示し、古いバイナリの取り違えに気付けるようにする
-    local id branch sha
-    while IFS=$'\t' read -r id branch sha; do
-      echo "既存セッション ${session}: run ${id} (branch=${branch} commit=${sha:0:7})"
+    local id status branch sha
+    while IFS=$'\t' read -r id status branch sha; do
+      echo "既存セッション ${session}: run ${id} (${status} branch=${branch} commit=${sha:0:7})"
     done <<<"$runs"
 
     if [ "$force" -eq 1 ]; then
       # shellcheck disable=SC2046
       cancel_run_ids $(cut -f1 <<<"$runs")
-      # 同名 hostname の node が tailnet に残ったまま起動すると MagicDNS 名が競合するため、消えるのを待つ
-      if [ -n "$ip" ]; then
-        echo "既存 node simtunnel-${session} が tailnet から消えるのを待機中..."
-        for _ in $(seq 1 24); do
-          sleep 5
-          [ -z "$(session_ip "$session")" ] && break
-        done
-        if [ -n "$(session_ip "$session")" ]; then
-          echo "2 分待っても simtunnel-${session} が tailnet から消えない。時間をおいて再実行して" >&2
-          return 1
-        fi
-      fi
+      # shellcheck disable=SC2046
+      wait_runs_terminal $(cut -f1 <<<"$runs") || return 1
     else
       if [ -n "$ref" ]; then
-        local want_sha run_sha
-        # API rate limit の影響を受けない git ls-remote を優先し、git で認証できない repo は gh api で補う
-        want_sha=$(git ls-remote "https://github.com/${REPO}.git" "refs/heads/${ref}" "refs/tags/${ref}" 2>/dev/null | head -n 1 | cut -f1 || true)
-        if [ -z "$want_sha" ]; then
-          want_sha=$(gh api "repos/${REPO}/commits/${ref}" --jq .sha 2>/dev/null) || want_sha=""
-        fi
-        run_sha=$(head -n 1 <<<"$runs" | cut -f3)
-        if [ -z "$want_sha" ]; then
-          echo "--ref ${ref} の最新コミットを取得できず、既存セッションが同じコミットか確認できない。作り直すには --force を付ける" >&2
-          return 1
-        fi
-        if [ "$want_sha" != "$run_sha" ]; then
-          echo "既存セッションは --ref ${ref} の最新コミット (${want_sha:0:7}) と別のコミット (${run_sha:0:7}) で動いている。作り直すには --force を付ける" >&2
+        # queued と in_progress の run が共存し得るため (concurrency は cancel-in-progress: false)、
+        # 全 run の commit が ref と一致する時だけ既存セッションを使う
+        local mismatch_sha
+        mismatch_sha=$(awk -F'\t' -v want="$want_sha" '$4 != want {print $4; exit}' <<<"$runs")
+        if [ -n "$mismatch_sha" ]; then
+          echo "既存セッションに --ref ${ref} の最新コミット (${want_sha:0:7}) と別のコミット (${mismatch_sha:0:7}) の run が含まれる。作り直すには --force を付ける" >&2
           return 1
         fi
       fi
@@ -129,6 +178,9 @@ cmd_up() {
       return 0
     fi
   fi
+
+  # 同名 hostname の node 登録 (offline 含む) が残ったまま dispatch すると MagicDNS 名が競合するため、消えるのを待つ
+  wait_node_unregistered "$session" || return 1
 
   # workflow 側で未定義の input を送ると dispatch 自体が拒否されるため、
   # 空の任意 input は送らない（app_zip_url 等を宣言しない薄い caller workflow に対応）
@@ -153,7 +205,7 @@ cmd_wait() {
   for _ in $(seq 1 80); do
     local ip
     ip=$(session_ip "$session")
-    if [ -n "$ip" ] && curl -s -m 3 "http://${ip}:8100/status" >/dev/null 2>&1; then
+    if [ -n "$ip" ] && [ "$(curl -s -m 3 -o /dev/null -w '%{http_code}' "http://${ip}:8100/status" 2>/dev/null)" = "200" ]; then
       echo "ready: http://simtunnel-${session}:8100 (${ip})"
       return 0
     fi
