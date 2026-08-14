@@ -201,11 +201,14 @@ jobs:
       TS_OIDC_AUDIENCE: ${{ secrets.TS_OIDC_AUDIENCE }}
 ```
 
-ローカル CLI は `SIMTUNNEL_REPO` でアプリ repo に向ける（`SIMTUNNEL_WORKFLOW` は caller workflow のファイル名。既定 `simulator-session.yml`）:
+ローカル CLI の対象 repo は「`SIMTUNNEL_REPO` → カレントディレクトリの repo（`gh repo view`）」の順で決まる。アプリ repo の作業ディレクトリ（worktree 含む）で実行するなら指定は要らない（`SIMTUNNEL_WORKFLOW` は caller workflow のファイル名。既定 `simulator-session.yml`）:
 
 ```bash
-SIMTUNNEL_REPO=<owner>/<repo> local/simtunnel up <session> --wait
+cd <アプリ repo の作業ディレクトリ> && local/simtunnel up <session> --wait   # 対象 repo は gh から解決
+SIMTUNNEL_REPO=<owner>/<repo> local/simtunnel up <session> --wait            # 明示指定
 ```
+
+**既定 repo（`bannzai/simtunnel`）へのフォールバックはしない。** 対象 repo が決まらない場合はエラーで停止する。フォールバックすると `up` した repo と別の repo を検索することになり、`down` が「実行中 run はない」と冪等成功で空振りして runner を掴んだまま放置される（実測: bannzai/mementomorning で `up` したセッションを、`SIMTUNNEL_REPO` なしの `down` が既定 repo を見て取りこぼした）。同じ理由で、対象 repo は実行のたびに標準エラーへ表示する。
 
 #### ビルドに自由な step が必要なアプリ（Flutter 等）: build job 分割 + artifact 渡し
 
@@ -577,7 +580,7 @@ env = { SIMTUNNEL_WDA_URL = "http://simtunnel-<session>:8100" }
 ### Phase 5: 各アプリ repo への展開
 - [x] reusable workflow 化（完了: 2026-07-06）: `session.yml`（workflow_call）+ `simulator-session.yml`（dispatch ラッパー）に分割。ビルド対象を input 化（`build_project` / `build_scheme` / `build_configuration`）。runner スクリプトは `github.job_workflow_sha` で同一 commit を checkout。ローカル CLI は `SIMTUNNEL_REPO` / `SIMTUNNEL_WORKFLOW` で対象 repo を切り替え（詳細:「各アプリ repo での実行」）
 - [x] Tailscale trust credential の subject ワイルドカード検証（完了: 2026-07-06）: subject ワイルドカード（`repo:<owner>/*` 形式）の credential で、caller repo が異なる run（SimTunnelDemoProject）の認証が通ることを確認
-- [x] SwiftUI 実験 repo（bannzai/SimTunnelDemoProject）で実戦（完了: 2026-07-06）: caller workflow + Secrets をセットアップし、up → status 200 → mcp-config → mobile-mcp 互換ツールで tap / screenshot / HOME / launch_app → down の一連を確認（記録: SimTunnelDemoProject PR #1 のコメント）。`local/simtunnel` は `up` だけでなく `down` / `status` 等も `SIMTUNNEL_REPO` 指定が必要
+- [x] SwiftUI 実験 repo（bannzai/SimTunnelDemoProject）で実戦（完了: 2026-07-06）: caller workflow + Secrets をセットアップし、up → status 200 → mcp-config → mobile-mcp 互換ツールで tap / screenshot / HOME / launch_app → down の一連を確認（記録: SimTunnelDemoProject PR #1 のコメント）。`local/simtunnel` は `up` だけでなく `down` / `list` も対象 repo の解決が必要（当時は `SIMTUNNEL_REPO` の明示が必須。2026-08-14 以降はカレントディレクトリからの解決に対応。詳細:「各アプリ repo での実行」）
 - [x] Maestro flow の自動実行（完了: 2026-07-07）: caller repo の `.maestro/flows/simtunnel/setup.yml` を自動検出し、アプリ install / launch 後・WDA 起動前に runner 上で実行（設計:「オンボーディング突破用 Maestro flow の自動実行」）。Pilll 実 run でオンボーディング突破 → 直後の WDA 操作（tap）に干渉が無いことを確認（記録: simtunnel PR #19 コメント）。実測: maestro step 全体 約 6 分（CLI インストール約 30 秒 + ドライバ起動約 2 分 + flow 実行約 4 分）、setup.yml が無い repo でのスキップは約 0.6 秒。flow 失敗時に警告のみでセッションが開くことも実 run で確認済み
 - [x] Flutter (bannzai/Pilll) への展開（完了: 2026-07-06）: 「build job 分割 + artifact 渡し」方式で caller workflow を追加。build（`make secret` → flutter build --simulator）約 10 分 + セッション準備で、dispatch → 操作可能まで約 15 分。MCP 経由の tap（OS アラート / アプリ内ボタン → ボトムシート表示）とスクリーンショットを実 run で確認（記録: Pilll PR #1812 のコメント）。序盤 2 回の run は keepalive 早期終了（「未検証事項・リスク」参照）に当たり、keepalive 強化後の run で安定
 
