@@ -68,6 +68,19 @@ resolve_ref_sha() {
   printf '%s' "$sha"
 }
 
+# ref 上に workflow_dispatch 対応の対象 workflow ファイルが存在するか
+# (gh workflow run --ref は ref 上の workflow 定義を使うため、無い ref への dispatch は失敗する)。
+# raw.githubusercontent.com は API rate limit と別枠のため優先し、取れない repo は gh api で補う
+workflow_dispatchable_on_ref() {
+  local ref=$1
+  local content
+  content=$(curl -sfL -m 10 "https://raw.githubusercontent.com/${REPO}/${ref}/.github/workflows/${WORKFLOW}" 2>/dev/null || true)
+  if [ -z "$content" ]; then
+    content=$(gh api "repos/${REPO}/contents/.github/workflows/${WORKFLOW}?ref=${ref}" --jq .content 2>/dev/null | tr -d '\n' | base64 -d 2>/dev/null || true)
+  fi
+  [ -n "$content" ] && grep -q "workflow_dispatch" <<<"$content"
+}
+
 # 指定 run 群が terminal state になるまで待つ (gh run cancel はキャンセル要求を送るだけで終了を待たないため)
 wait_runs_terminal() {
   local id st
@@ -156,6 +169,11 @@ cmd_up() {
     done <<<"$runs"
 
     if [ "$force" -eq 1 ]; then
+      # ref 上に dispatch できる workflow が無いままキャンセルすると、再 dispatch が失敗してセッションだけが失われる
+      if [ -n "$ref" ] && ! workflow_dispatchable_on_ref "$ref"; then
+        echo "--ref ${ref} に workflow_dispatch 対応の ${WORKFLOW} が見つからない。既存 run はキャンセルしない" >&2
+        return 1
+      fi
       # shellcheck disable=SC2046
       cancel_run_ids $(cut -f1 <<<"$runs")
       # shellcheck disable=SC2046
