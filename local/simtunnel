@@ -2,7 +2,7 @@
 # SimTunnel ローカル CLI。GHA 上の iOS Simulator セッションを管理する。
 #
 # 使い方:
-#   simtunnel up <session> [--device "iPhone 16"] [--duration 60] [--simulators 2] [--ref <branch>] [--app-zip-url <url>] [--bundle-id <id>] [--wait]
+#   simtunnel up <session> [--device "iPhone 16"] [--duration 60] [--simulators 2] [--ref <branch>] [--app-zip-url <url>] [--bundle-id <id>] [--wait] [--force]
 #   simtunnel down <session>
 #   simtunnel list
 #   simtunnel status <session> [--slot 1]
@@ -27,23 +27,40 @@ ts_bin() {
   fi
 }
 
-# tailnet に参加している simtunnel-<session> の IP を返す（未参加なら空）
+# tailnet に参加している simtunnel-<session> の IP を返す（未参加なら空）。
+# 終了済みセッションの node が offline のまま一覧に残ることがあるため、offline の peer は対象にしない
 session_ip() {
   local session=$1
-  "$(ts_bin)" status 2>/dev/null | awk -v h="simtunnel-${session}" '$2 == h {print $1; exit}'
+  "$(ts_bin)" status 2>/dev/null | awk -v h="simtunnel-${session}" '$2 == h && $5 != "offline" {print $1; exit}'
 }
 
-# session 名に一致する実行中/待機中の run ID を列挙する
-session_run_ids() {
+# session 名に一致する実行中/待機中の run を "runID<TAB>headBranch<TAB>headSha" で列挙する
+session_runs() {
   local session=$1
-  gh run list -R "$REPO" --workflow "$WORKFLOW" \
-    --json databaseId,displayTitle,status \
-    --jq ".[] | select(.status == \"in_progress\" or .status == \"queued\") | select(.displayTitle | startswith(\"session=${session} \")) | .databaseId"
+  gh run list -R "$REPO" --workflow "$WORKFLOW" -L 50 \
+    --json databaseId,displayTitle,status,headBranch,headSha \
+    --jq ".[] | select(.status == \"in_progress\" or .status == \"queued\") | select(.displayTitle | startswith(\"session=${session} \")) | [.databaseId, .headBranch, .headSha] | @tsv"
+}
+
+cancel_run_ids() {
+  local id
+  for id in "$@"; do
+    gh run cancel "$id" -R "$REPO"
+    echo "cancelled: run ${id}"
+  done
+}
+
+# tailnet に node はあるのに $REPO 側に run が見つからない時の案内。
+# SIMTUNNEL_REPO の指定漏れで別 repo を見ている可能性が高いため、冪等成功にせずエラーにする
+warn_repo_mismatch() {
+  local session=$1
+  echo "simtunnel-${session} は tailnet に存在するが、${REPO} に対象 run が見つからない" >&2
+  echo "SIMTUNNEL_REPO の指定漏れの可能性。確認: gh run list -R <owner>/<repo> -w ${WORKFLOW}" >&2
 }
 
 cmd_up() {
   local session=$1; shift
-  local device="iPhone 17" duration=60 simulators="" ref="" app_zip_url="" bundle_id="" wait=0
+  local device="iPhone 17" duration=60 simulators="" ref="" app_zip_url="" bundle_id="" wait=0 force=0
   while [ $# -gt 0 ]; do
     case "$1" in
       --device) device=$2; shift 2 ;;
@@ -53,17 +70,64 @@ cmd_up() {
       --app-zip-url) app_zip_url=$2; shift 2 ;;
       --bundle-id) bundle_id=$2; shift 2 ;;
       --wait) wait=1; shift ;;
+      --force) force=1; shift ;;
       *) echo "不明なオプション: $1" >&2; exit 1 ;;
     esac
   done
 
-  if [ -n "$(session_ip "$session")" ]; then
-    echo "セッション ${session} はすでに tailnet に存在する（冪等: 何もしない）"
-    return 0
-  fi
-  if [ -n "$(session_run_ids "$session")" ]; then
-    echo "セッション ${session} の run はすでに起動中（準備中の可能性。simtunnel status ${session} で確認）"
-    return 0
+  local ip runs
+  ip=$(session_ip "$session")
+  runs=$(session_runs "$session")
+  if [ -n "$ip" ] || [ -n "$runs" ]; then
+    if [ -z "$runs" ]; then
+      warn_repo_mismatch "$session"
+      return 1
+    fi
+    # 既存セッションがどのコミットで動いているかを常に表示し、古いバイナリの取り違えに気付けるようにする
+    local id branch sha
+    while IFS=$'\t' read -r id branch sha; do
+      echo "既存セッション ${session}: run ${id} (branch=${branch} commit=${sha:0:7})"
+    done <<<"$runs"
+
+    if [ "$force" -eq 1 ]; then
+      # shellcheck disable=SC2046
+      cancel_run_ids $(cut -f1 <<<"$runs")
+      # 同名 hostname の node が tailnet に残ったまま起動すると MagicDNS 名が競合するため、消えるのを待つ
+      if [ -n "$ip" ]; then
+        echo "既存 node simtunnel-${session} が tailnet から消えるのを待機中..."
+        for _ in $(seq 1 24); do
+          sleep 5
+          [ -z "$(session_ip "$session")" ] && break
+        done
+        if [ -n "$(session_ip "$session")" ]; then
+          echo "2 分待っても simtunnel-${session} が tailnet から消えない。時間をおいて再実行して" >&2
+          return 1
+        fi
+      fi
+    else
+      if [ -n "$ref" ]; then
+        local want_sha run_sha
+        # API rate limit の影響を受けない git ls-remote を優先し、git で認証できない repo は gh api で補う
+        want_sha=$(git ls-remote "https://github.com/${REPO}.git" "refs/heads/${ref}" "refs/tags/${ref}" 2>/dev/null | head -n 1 | cut -f1 || true)
+        if [ -z "$want_sha" ]; then
+          want_sha=$(gh api "repos/${REPO}/commits/${ref}" --jq .sha 2>/dev/null) || want_sha=""
+        fi
+        run_sha=$(head -n 1 <<<"$runs" | cut -f3)
+        if [ -z "$want_sha" ]; then
+          echo "--ref ${ref} の最新コミットを取得できず、既存セッションが同じコミットか確認できない。作り直すには --force を付ける" >&2
+          return 1
+        fi
+        if [ "$want_sha" != "$run_sha" ]; then
+          echo "既存セッションは --ref ${ref} の最新コミット (${want_sha:0:7}) と別のコミット (${run_sha:0:7}) で動いている。作り直すには --force を付ける" >&2
+          return 1
+        fi
+      fi
+      echo "セッション ${session} はすでに存在する（冪等: dispatch しない。作り直すには --force）"
+      if [ "$wait" -eq 1 ]; then
+        cmd_wait "$session"
+      fi
+      return 0
+    fi
   fi
 
   # workflow 側で未定義の input を送ると dispatch 自体が拒否されるため、
@@ -102,16 +166,17 @@ cmd_wait() {
 cmd_down() {
   local session=$1
   local ids
-  ids=$(session_run_ids "$session")
+  ids=$(session_runs "$session" | cut -f1)
   if [ -z "$ids" ]; then
-    echo "セッション ${session} の実行中 run はない（冪等: 何もしない）"
+    if [ -n "$(session_ip "$session")" ]; then
+      warn_repo_mismatch "$session"
+      return 1
+    fi
+    echo "セッション ${session} の実行中 run はない（冪等: 何もしない。対象 repo: ${REPO}）"
     return 0
   fi
-  local id
-  for id in $ids; do
-    gh run cancel "$id" -R "$REPO"
-    echo "cancelled: run ${id}"
-  done
+  # shellcheck disable=SC2086
+  cancel_run_ids $ids
 }
 
 cmd_list() {
