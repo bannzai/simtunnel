@@ -204,8 +204,10 @@ jobs:
 ローカル CLI の対象 repo は「`SIMTUNNEL_REPO` → カレントディレクトリの repo（`gh repo view`）」の順で決まる。アプリ repo の作業ディレクトリ（worktree 含む）で実行するなら指定は要らない（`SIMTUNNEL_WORKFLOW` は caller workflow のファイル名。既定 `simulator-session.yml`）:
 
 ```bash
-cd <アプリ repo の作業ディレクトリ> && local/simtunnel up <session> --wait   # 対象 repo は gh から解決
-SIMTUNNEL_REPO=<owner>/<repo> local/simtunnel up <session> --wait            # 明示指定
+# 対象 repo は gh から解決（アプリ repo 側に local/simtunnel は無いため CLI はフルパスか PATH 上のコマンドで叩く）
+cd <アプリ repo の作業ディレクトリ> && ~/ghq/github.com/bannzai/simtunnel/local/simtunnel up <session> --wait
+# 明示指定（どのディレクトリからでも可）
+SIMTUNNEL_REPO=<owner>/<repo> local/simtunnel up <session> --wait
 ```
 
 **既定 repo（`bannzai/simtunnel`）へのフォールバックはしない。** 対象 repo が決まらない場合はエラーで停止する。フォールバックすると `up` した repo と別の repo を検索することになり、`down` が「実行中 run はない」と冪等成功で空振りして runner を掴んだまま放置される（実測: bannzai/mementomorning で `up` したセッションを、`SIMTUNNEL_REPO` なしの `down` が既定 repo を見て取りこぼした）。同じ理由で、対象 repo は実行のたびに標準エラーへ表示する。

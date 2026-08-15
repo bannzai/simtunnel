@@ -22,7 +22,7 @@ set -euo pipefail
 REPO="${SIMTUNNEL_REPO:-}"
 WORKFLOW="${SIMTUNNEL_WORKFLOW:-simulator-session.yml}"
 
-# GitHub の run を扱うコマンド（up / down / list / wait）用に $REPO を確定する。
+# GitHub の run を扱うコマンド（up / down / list）用に $REPO を確定する。
 # 解決できない時に既定 repo へフォールバックすると、up した repo と別の repo を検索して
 # down が「run はない」と冪等成功で空振りするため、フォールバックせずエラーにする。
 # どの repo を対象にしたかを毎回表示し、取り違えに気付けるようにする
@@ -31,7 +31,9 @@ ensure_repo() {
     echo "対象リポジトリ: ${REPO} (SIMTUNNEL_REPO)" >&2
     return 0
   fi
-  REPO=$(gh repo view --json nameWithOwner --jq .nameWithOwner 2>/dev/null) || REPO=""
+  # GH_REPO が設定されているとカレントディレクトリではなくその値が返るため、
+  # 解決元を「カレントディレクトリ」に固定するよう env から外して実行する
+  REPO=$(env -u GH_REPO gh repo view --json nameWithOwner --jq .nameWithOwner 2>/dev/null) || REPO=""
   if [ -z "$REPO" ]; then
     echo "対象リポジトリを決められない（カレントディレクトリから GitHub リポジトリを解決できない）" >&2
     echo "caller workflow (${WORKFLOW}) を持つリポジトリ内で実行するか、SIMTUNNEL_REPO=<owner>/<repo> を指定して" >&2
