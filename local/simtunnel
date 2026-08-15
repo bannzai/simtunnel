@@ -12,12 +12,36 @@
 #
 # --slot は複数 Simulator セッション（up --simulators N）の i 台目 (0 始まり) を指す。WDA :8100+i / MJPEG :9100+i
 #
-# 対象リポジトリの切り替え（各アプリ repo の caller workflow を叩く場合）:
+# 対象リポジトリ（caller workflow を持つ repo）は次の順で決まる:
+#   1. SIMTUNNEL_REPO=<owner>/<repo>（明示指定）
+#   2. カレントディレクトリの GitHub リポジトリ（gh repo view から解決）
+# どちらでも決まらない場合はエラーにする（既定 repo へのフォールバックはしない）
 #   SIMTUNNEL_REPO=<owner>/<repo> [SIMTUNNEL_WORKFLOW=simulator-session.yml] simtunnel up <session>
 set -euo pipefail
 
-REPO="${SIMTUNNEL_REPO:-bannzai/simtunnel}"
+REPO="${SIMTUNNEL_REPO:-}"
 WORKFLOW="${SIMTUNNEL_WORKFLOW:-simulator-session.yml}"
+
+# GitHub の run を扱うコマンド（up / down / list）用に $REPO を確定する。
+# 解決できない時に既定 repo へフォールバックすると、up した repo と別の repo を検索して
+# down が「run はない」と冪等成功で空振りするため、フォールバックせずエラーにする。
+# どの repo を対象にしたかを毎回表示し、取り違えに気付けるようにする
+ensure_repo() {
+  if [ -n "$REPO" ]; then
+    echo "対象リポジトリ: ${REPO} (SIMTUNNEL_REPO)" >&2
+    return 0
+  fi
+  # GH_REPO が設定されているとカレントディレクトリではなくその値が返るため、
+  # 解決元を「カレントディレクトリ」に固定するよう env から外して実行する
+  REPO=$(env -u GH_REPO gh repo view --json nameWithOwner --jq .nameWithOwner 2>/dev/null) || REPO=""
+  if [ -z "$REPO" ]; then
+    echo "対象リポジトリを決められない（カレントディレクトリから GitHub リポジトリを解決できない）" >&2
+    echo "caller workflow (${WORKFLOW}) を持つリポジトリ内で実行するか、SIMTUNNEL_REPO=<owner>/<repo> を指定して" >&2
+    return 1
+  fi
+  echo "対象リポジトリ: ${REPO} (カレントディレクトリから解決)" >&2
+  return 0
+}
 
 ts_bin() {
   if command -v tailscale >/dev/null 2>&1; then
@@ -120,11 +144,12 @@ cancel_run_ids() {
 }
 
 # tailnet に node はあるのに $REPO 側に run が見つからない時の案内。
-# SIMTUNNEL_REPO の指定漏れで別 repo を見ている可能性が高いため、冪等成功にせずエラーにする
+# up した repo と別の repo を見ている可能性が高いため、冪等成功にせずエラーにする
 warn_repo_mismatch() {
   local session=$1
   echo "simtunnel-${session} は tailnet に存在するが、${REPO} に対象 run が見つからない" >&2
-  echo "SIMTUNNEL_REPO の指定漏れの可能性。確認: gh run list -R <owner>/<repo> -w ${WORKFLOW}" >&2
+  echo "up した repo と別の repo を見ている可能性（カレントディレクトリ / SIMTUNNEL_REPO を確認）" >&2
+  echo "確認: gh run list -R <owner>/<repo> -w ${WORKFLOW}" >&2
 }
 
 cmd_up() {
@@ -143,6 +168,8 @@ cmd_up() {
       *) echo "不明なオプション: $1" >&2; exit 1 ;;
     esac
   done
+
+  ensure_repo || return 1
 
   # --ref が解決できないまま既存 run をキャンセルするとセッションだけが失われるため、破壊的操作の前に解決する
   local want_sha=""
@@ -229,12 +256,14 @@ cmd_wait() {
     fi
     sleep 15
   done
-  echo "20 分以内に準備完了しなかった。run の状態: gh run list -R ${REPO} -w ${WORKFLOW}" >&2
+  # 直接 simtunnel wait を叩いた場合は $REPO が未解決のため、確認コマンドはプレースホルダーで案内する
+  echo "20 分以内に準備完了しなかった。run の状態: gh run list -R ${REPO:-<owner>/<repo>} -w ${WORKFLOW}" >&2
   return 1
 }
 
 cmd_down() {
   local session=$1
+  ensure_repo || return 1
   local ids
   ids=$(session_runs "$session" | cut -f1)
   if [ -z "$ids" ]; then
@@ -253,7 +282,8 @@ cmd_list() {
   echo "== tailnet 上のセッション =="
   "$(ts_bin)" status 2>/dev/null | awk '$2 ~ /^simtunnel-/ {print $2 "  " $1}' | sort
   echo ""
-  echo "== workflow run（直近 10 件）=="
+  ensure_repo || return 1
+  echo "== ${REPO} の workflow run（直近 10 件）=="
   gh run list -R "$REPO" --workflow "$WORKFLOW" -L 10
 }
 
