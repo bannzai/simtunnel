@@ -678,7 +678,7 @@ env = { SIMTUNNEL_WDA_URL = "http://simtunnel-<session>:8100" }
   - 検証（実 run / iPhone 17 / simulators=1）: 許可した 5 動詞がすべて 200（`status_bar override` は `9:41` / 電池 100% / 4 本アンテナがスクリーンショットに反映、`relaunch` はアプリが前面に戻ることを確認、`record/stop` は runner 上のパスとサイズを返した）。許可外・不正入力は `spawn` / `openurl` が 404、`udid` 指定・範囲外 slot・不正な起動引数・未知のキー・`aps` の無い payload・列挙外の privacy service・範囲外の status_bar 値が 400、セッション外の bundleId が 403
   - ローカル検証: `python3 runner/test/test-agentd.py`（`xcrun` をスタブに差し替えて 18 ケース）
 - [x] クライアント側録画 `simtunnel record`（完了: 2026-08-17）: MJPEG (:9100) をローカルに録画する（設計:「画面の録画」）
-  - 検証（実 run）: 25 秒で 229 フレーム（9.2 fps / 13.2MB）、`--mp4` の ffmpeg 変換、録画中の画面遷移（アプリ → ホーム画面）をフレーム番号で特定できることを確認
+  - 検証（実 run / 2 本）: 25 秒の録画で 229 フレーム（9.2 fps / 13.2MB）と `--mp4` の ffmpeg 変換を確認。別の約 19 秒の録画（81 フレーム / 4.2 fps）で、録画中に起こした画面遷移（アプリ → ホーム画面）が 64 フレーム目として特定できることを確認
 - [x] 1 runner 複数 Simulator（完了: 2026-07-07）: `simulators` input で台数指定。2 台目以降はデバイスの clone を boot し、i 台目の WDA に per-sim の xctestrun コピーで `USE_PORT=8100+i` / `MJPEG_SERVER_PORT=9100+i` を注入する。CLI / mcp-config は `--slot` で台を指定。simulators=2 の実 run で両ポート HTTP 200・サンプルアプリ両台 install・slot 1 のみ tap して独立性をスクリーンショットで確認。ハマり: xctestrun のコピーは `__TESTROOT__` 相対で成果物を参照するため、元と同じディレクトリに置く必要がある。3 台以上のメモリ成立性は未検証
 - [x] serve-sim の複数 Simulator 対応（完了: 2026-07-10）: serve-sim は 1 プロセスで複数 UDID を配信できる（CLI が可変長で UDID を受け、デバイスごとの view は `/?device=<UDID>`、ストリームは `/helper/<UDID>/stream.mjpeg`、一覧は `/grid/api`。すべて :3200）ため、slot ごとの多重起動ではなく **全 UDID を 1 プロセスに渡す方式**を採用。tailnet への公開ポートは :3200 のまま増えず、多重起動によるメモリ増も避けられる（「リポジトリ公開に耐える安全性」の範囲内）
   - `local/simtunnel preview <session> --slot <i>` は `/grid/api` の一覧から clone 命名（boot-simulator.sh の `<デバイス名> simtunnel-<slot+1>`）で UDID を引き当て、`?device=` 付き URL を開く。slot 0 は既定表示のため解決不要
