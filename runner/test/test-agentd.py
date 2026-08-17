@@ -38,6 +38,10 @@ if [ "$2" = "listapps" ]; then
         ApplicationType = System;
         CFBundleIdentifier = "com.apple.Maps";
     };
+    "com.facebook.WebDriverAgentRunner.xctrunner" = {
+        ApplicationType = User;
+        CFBundleIdentifier = "com.facebook.WebDriverAgentRunner.xctrunner";
+    };
 }
 PLIST
 fi
@@ -168,6 +172,12 @@ class AgentdTestCase(unittest.TestCase):
 
     def test_bundle_id_outside_session_is_rejected(self):
         status, _ = self.post("/v1/relaunch", {"bundleId": "com.apple.Maps"})
+        self.assertEqual(status, 403)
+        self.assertEqual(self.simctl_calls(), [])
+
+    def test_xctest_runner_is_not_operable(self):
+        # WDA / maestro のドライバを terminate できるとセッション自体を殺せてしまう
+        status, _ = self.post("/v1/relaunch", {"bundleId": "com.facebook.WebDriverAgentRunner.xctrunner"})
         self.assertEqual(status, 403)
         self.assertEqual(self.simctl_calls(), [])
 

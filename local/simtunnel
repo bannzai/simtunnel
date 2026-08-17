@@ -375,9 +375,10 @@ cmd_record() {
 
   mkdir -p "$(dirname "$out")"
   echo "録画中（${duration} 秒 / slot ${slot}）... MJPEG は 1 クライアント占有のため screenshot / preview は同時に使えない"
-  # curl は --max-time で打ち切られると 28 を返すが、これは録画の正常終了なので失敗扱いにしない
-  local result
-  result=$({ curl -sN -m "$duration" "http://${ip}:$((9100 + slot))" || true; } | OUT="$out" python3 - <<'EOF'
+  # ストリームを stdin で受けるため、抽出スクリプトは `python3 -` ではなく -c で渡す
+  # （heredoc を stdin に載せると、python がスクリプトを読んだ時点で stdin を使い切る）
+  local extract
+  IFS= read -r -d '' extract <<'EOF' || true
 import os, sys, time
 start = time.time()
 frames = 0
@@ -405,7 +406,10 @@ if frames == 0:
     sys.exit(1)
 print(f"{frames} {time.time() - start:.1f}")
 EOF
-  ) || return 1
+
+  # curl は --max-time で打ち切られると 28 を返すが、これは録画の正常終了なので失敗扱いにしない
+  local result
+  result=$({ curl -sN -m "$duration" "http://${ip}:$((9100 + slot))" || true; } | OUT="$out" python3 -c "$extract") || return 1
 
   local frames elapsed fps
   read -r frames elapsed <<<"$result"

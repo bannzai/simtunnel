@@ -142,6 +142,7 @@ simctl が必要な操作（アプリの launch / terminate、通知の合成等
 - **録画中は再エンコードしない**。multipart のヘッダだけ落として JPEG フレームをそのまま追記保存する（`.mjpeg` = JPEG の連結）。ローカルの負荷はディスク書き込みが支配的で軽微。mp4 が要る場合だけ、録画終了後に `--mp4`（ffmpeg）で変換する
 - **MJPEG は実質 1 クライアント占有**（Phase 4 の serve-sim 実測と同じ制約）。録画中は `screenshot` / `preview` を併用できない
 - 録画からフレームを切り出す: `ffmpeg -f mjpeg -i <出力.mjpeg> -fps_mode passthrough ./tmp/frame-%04d.jpg`
+- **ストリームは実時間から数秒遅れて届く**（実測 2026-08-17: HOME を押してから録画に現れるまで約 9 秒。DERP relay のバッファリングによる）。確認したい操作の前に録画を始め、操作から十分あとまで録り続ける
 - 用途: 通知バナー発火の事後確認、E2E 操作の証跡、flaky の再現調査
 
 ### simtunnel-agentd（許可リスト式の simctl 受け口）
@@ -168,6 +169,11 @@ WDA では届かない領域（起動引数を要する状態の作り込み、�
 - `simctl spawn` / `openurl` / `keychain` / `addmedia` など、**シミュレータ内での任意実行やホストのファイル参照につながる動詞は追加しない**
 - 呼び出しの監査ログは runner ローカル（`$RUNNER_TEMP/agentd-audit.log`）にだけ記録する。HTTP サーバの既定のアクセスログも stderr ではなくこのファイルへ流し、public repo の run ログ・ステップサマリに値を出さない
 - **録画ファイルを転送するエンドポイントは持たない**。`record/stop` は runner 上のパスとサイズを返すだけにする。DERP relay 経由（実測 約 60KB/s）では動画の取り出しが現実的な時間で終わらず、ローカル側の録画は `simtunnel record` で足りるため
+
+ハマりどころ:
+
+- **WDA / maestro のドライバ（`*.xctrunner`）も User アプリとして `listapps` に並ぶ**（実測 2026-08-17）。これを操作できると `relaunch` でセッション自体を殺せてしまうため、許可リストから除外している
+- **`push` が 200 を返しても、対象アプリが通知許可を得ていなければバナーは表示されない**（実測 2026-08-17。simtunnel のサンプルアプリは通知許可を要求しないため、`push` は成功するが画面には出ない）。バナーの発火を確認したいアプリ側では、通知許可を得た状態を作ってから `push` する
 
 呼び出しはセッション名で直接 curl する（専用の CLI サブコマンドは持たない）:
 
@@ -668,9 +674,11 @@ env = { SIMTUNNEL_WDA_URL = "http://simtunnel-<session>:8100" }
   - `local/simtunnel preview <session>` でブラウザを開く（Host ヘッダから stream URL を組むため MagicDNS 名で開く）
   - **ストリームは実質 1 クライアント占有**（実測）。別のブラウザ（agent-browser 含む）が掴んでいると「No simulator / connecting」のまま繋がらない。繋がらない時はまず他のクライアントを閉じる。「control socket connect timeout」が出た場合は Retry で復旧する
 - [x] mobile-mcp 互換ツール（完了: 2026-07-06）: `mcp__mobile__*` ツール名前提の既存 skill を simtunnel 経由で動かすための互換レイヤーを simtunnel-mcp に追加。詳細は「MCP の登録 > mobile-mcp 互換ツール」
-- [ ] simtunnel-agentd: runner 上の HTTP 受け口（tailnet 内限定）で simctl を遠隔実行
-      （ローカルでビルドした .app を zip で転送 → install → launch のループを可能にする。
-      per-repo 展開によりアプリは各 repo の runner でビルドするため優先度は下がった）
+- [x] simtunnel-agentd（完了: 2026-08-17）: runner 上の HTTP 受け口（:8200 / tailnet 内限定）で、許可した simctl の動詞だけを遠隔実行する（設計:「simtunnel-agentd」）。当初想定していた「.app を zip で転送 → install → launch」は per-repo 展開でアプリを各 repo の runner がビルドするようになったため実装せず、WDA では届かない領域（起動引数・通知・権限・ステータスバー）に絞った
+  - 検証（実 run / iPhone 17 / simulators=1）: 許可した 5 動詞がすべて 200（`status_bar override` は `9:41` / 電池 100% / 4 本アンテナがスクリーンショットに反映、`relaunch` はアプリが前面に戻ることを確認、`record/stop` は runner 上のパスとサイズを返した）。許可外・不正入力は `spawn` / `openurl` が 404、`udid` 指定・範囲外 slot・不正な起動引数・未知のキー・`aps` の無い payload・列挙外の privacy service・範囲外の status_bar 値が 400、セッション外の bundleId が 403
+  - ローカル検証: `python3 runner/test/test-agentd.py`（`xcrun` をスタブに差し替えて 18 ケース）
+- [x] クライアント側録画 `simtunnel record`（完了: 2026-08-17）: MJPEG (:9100) をローカルに録画する（設計:「画面の録画」）
+  - 検証（実 run）: 25 秒で 229 フレーム（9.2 fps / 13.2MB）、`--mp4` の ffmpeg 変換、録画中の画面遷移（アプリ → ホーム画面）をフレーム番号で特定できることを確認
 - [x] 1 runner 複数 Simulator（完了: 2026-07-07）: `simulators` input で台数指定。2 台目以降はデバイスの clone を boot し、i 台目の WDA に per-sim の xctestrun コピーで `USE_PORT=8100+i` / `MJPEG_SERVER_PORT=9100+i` を注入する。CLI / mcp-config は `--slot` で台を指定。simulators=2 の実 run で両ポート HTTP 200・サンプルアプリ両台 install・slot 1 のみ tap して独立性をスクリーンショットで確認。ハマり: xctestrun のコピーは `__TESTROOT__` 相対で成果物を参照するため、元と同じディレクトリに置く必要がある。3 台以上のメモリ成立性は未検証
 - [x] serve-sim の複数 Simulator 対応（完了: 2026-07-10）: serve-sim は 1 プロセスで複数 UDID を配信できる（CLI が可変長で UDID を受け、デバイスごとの view は `/?device=<UDID>`、ストリームは `/helper/<UDID>/stream.mjpeg`、一覧は `/grid/api`。すべて :3200）ため、slot ごとの多重起動ではなく **全 UDID を 1 プロセスに渡す方式**を採用。tailnet への公開ポートは :3200 のまま増えず、多重起動によるメモリ増も避けられる（「リポジトリ公開に耐える安全性」の範囲内）
   - `local/simtunnel preview <session> --slot <i>` は `/grid/api` の一覧から clone 命名（boot-simulator.sh の `<デバイス名> simtunnel-<slot+1>`）で UDID を引き当て、`?device=` 付き URL を開く。slot 0 は既定表示のため解決不要

@@ -92,10 +92,12 @@ class Agentd:
         return self.udids[slot]
 
     def user_bundle_ids(self, udid):
-        """Simulator に install 済みのユーザーアプリの bundle id。
+        """Simulator に install 済みで、操作してよいアプリの bundle id。
 
         runner の Simulator は毎回まっさらなため、ユーザーアプリ = このセッションで install した
-        アプリになる。許可リストを別ファイルで持たず Simulator の実態から引く"""
+        アプリになる。許可リストを別ファイルで持たず Simulator の実態から引く。
+        WDA / maestro のドライバも XCUITest runner (*.xctrunner) としてユーザーアプリに並ぶが、
+        これを terminate できるとセッション自体を殺せてしまうため対象から外す"""
         listed = self.run_simctl(["listapps", udid])
         converted = subprocess.run(
             ["plutil", "-convert", "json", "-o", "-", "--", "-"],
@@ -104,7 +106,10 @@ class Agentd:
         if converted.returncode != 0:
             raise RequestError(500, "simctl listapps の出力を解釈できない")
         apps = json.loads(converted.stdout.decode("utf-8"))
-        return {b for b, info in apps.items() if info.get("ApplicationType") == "User"}
+        return {
+            bundle_id for bundle_id, info in apps.items()
+            if info.get("ApplicationType") == "User" and not bundle_id.endswith(".xctrunner")
+        }
 
     def bundle_id(self, body, udid):
         allowed = self.user_bundle_ids(udid)
@@ -184,8 +189,9 @@ class Agentd:
     def verb_relaunch(self, body):
         self.reject_unknown_keys(body, ("slot", "bundleId", "args"))
         udid = self.udid(body)
-        bundle_id = self.bundle_id(body, udid)
+        # 引数の検証を bundleId の解決より先に行う（simctl を呼ばずに弾ける入力を先に落とす）
         args = self.launch_args(body)
+        bundle_id = self.bundle_id(body, udid)
         # 起動していないアプリの terminate は失敗するため、失敗を許容して launch へ進む
         self.run_simctl(["terminate", udid, bundle_id], allow_failure=True)
         self.run_simctl(["launch", udid, bundle_id, *args])
@@ -194,8 +200,8 @@ class Agentd:
     def verb_push(self, body):
         self.reject_unknown_keys(body, ("slot", "bundleId", "payload"))
         udid = self.udid(body)
-        bundle_id = self.bundle_id(body, udid)
         payload = self.push_payload(body)
+        bundle_id = self.bundle_id(body, udid)
         path = os.path.join(self.work_dir, f"agentd-push-{uuid.uuid4().hex}.json")
         with open(path, "w", encoding="utf-8") as f:
             json.dump(payload, f)
