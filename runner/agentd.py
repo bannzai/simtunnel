@@ -25,6 +25,11 @@ SIMCTL_TIMEOUT_SECONDS = 60
 # recordingId を受け取れなかったクライアントは録画を止められない。ジョブが終わるまで
 # 書き続けて runner のディスクを圧迫しないよう、サーバ側で必ず打ち切る
 MAX_RECORDING_SECONDS = 600
+# SIGINT で recordVideo が終わるのを待つ上限。通常は数秒で終わるが、起動直後に停止すると
+# SIGINT を取りこぼして終わらないことがある（実測 2026-08-17: 開始直後の stop が
+# simctl の 60 秒待ちに張り付き、クライアント側がタイムアウトした）。
+# 応答時間を SIMCTL_TIMEOUT_SECONDS より短く抑え、超えたら kill してエラーを返す
+RECORD_STOP_TIMEOUT_SECONDS = 20
 
 LAUNCH_ARG_PATTERN = re.compile(r"^[A-Za-z0-9_=-]+$")
 MAX_LAUNCH_ARGS = 16
@@ -232,11 +237,11 @@ class Agentd:
             # recordVideo は SIGINT でファイルを閉じて正常終了する
             process.send_signal(signal.SIGINT)
         try:
-            process.wait(timeout=SIMCTL_TIMEOUT_SECONDS)
+            process.wait(timeout=RECORD_STOP_TIMEOUT_SECONDS)
         except subprocess.TimeoutExpired:
             process.kill()
             process.wait()
-            return recording["path"], 0, "録画の停止がタイムアウトした"
+            return recording["path"], 0, f"{RECORD_STOP_TIMEOUT_SECONDS} 秒で録画を停止できず kill した（動画は壊れている可能性がある）"
         size = os.path.getsize(recording["path"]) if os.path.exists(recording["path"]) else 0
         error = None if size > 0 else f"録画ファイルが空（simctl 終了コード {process.returncode}）: {self.tail_log(recording['log_path'])}"
         return recording["path"], size, error

@@ -11,6 +11,7 @@ import stat
 import sys
 import tempfile
 import threading
+import time
 import unittest
 import urllib.error
 import urllib.request
@@ -23,6 +24,7 @@ spec.loader.exec_module(agentd_module)
 
 USER_BUNDLE_ID = "com.example.sample"
 SLOT_UDIDS = ["UDID-0", "UDID-1"]
+ORIGINAL_STOP_TIMEOUT_SECONDS = agentd_module.RECORD_STOP_TIMEOUT_SECONDS
 
 # 実 simctl の listapps と同じ OpenStep plist を返し、呼ばれた引数を argv ログへ残すスタブ
 XCRUN_STUB = r"""#!/bin/bash
@@ -31,7 +33,8 @@ if [ "${4:-}" = "recordVideo" ]; then
   # 実際の recordVideo は SIGINT を受けるまで動き続け、出力ファイルを書く
   [ "${XCRUN_RECORD_FAIL:-0}" = "1" ] && exit 1
   printf 'fake video' > "${!#}"
-  trap 'exit 0' INT
+  # 起動直後の停止で SIGINT を取りこぼす実機の挙動を再現する
+  [ "${XCRUN_RECORD_IGNORE_SIGINT:-0}" = "1" ] && trap '' INT || trap 'exit 0' INT
   while true; do sleep 0.1; done
 fi
 if [ "$2" = "listapps" ]; then
@@ -168,6 +171,20 @@ class AgentdTestCase(unittest.TestCase):
         self.assertEqual(status, 400)
         status, _ = self.post("/v1/record/stop", {"recordingId": second["recordingId"]})
         self.assertEqual(status, 200)
+
+    def test_record_stop_kills_process_that_ignores_sigint(self):
+        os.environ["XCRUN_RECORD_IGNORE_SIGINT"] = "1"
+        try:
+            _, started = self.post("/v1/record/start", {})
+            agentd_module.RECORD_STOP_TIMEOUT_SECONDS = 2
+            started_at = time.monotonic()
+            status, body = self.post("/v1/record/stop", {"recordingId": started["recordingId"]})
+        finally:
+            agentd_module.RECORD_STOP_TIMEOUT_SECONDS = ORIGINAL_STOP_TIMEOUT_SECONDS
+            del os.environ["XCRUN_RECORD_IGNORE_SIGINT"]
+        # 応答を返さずクライアントをぶら下げたままにしない
+        self.assertLess(time.monotonic() - started_at, 10)
+        self.assertEqual(status, 500, body)
 
     def test_record_start_failure_is_not_reported_as_success(self):
         os.environ["XCRUN_RECORD_FAIL"] = "1"
