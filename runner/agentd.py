@@ -25,11 +25,14 @@ SIMCTL_TIMEOUT_SECONDS = 60
 # recordingId を受け取れなかったクライアントは録画を止められない。ジョブが終わるまで
 # 書き続けて runner のディスクを圧迫しないよう、サーバ側で必ず打ち切る
 MAX_RECORDING_SECONDS = 600
-# SIGINT で recordVideo が終わるのを待つ上限。通常は数秒で終わるが、起動直後に停止すると
-# SIGINT を取りこぼして終わらないことがある（実測 2026-08-17: 開始直後の stop が
-# simctl の 60 秒待ちに張り付き、クライアント側がタイムアウトした）。
-# 応答時間を SIMCTL_TIMEOUT_SECONDS より短く抑え、超えたら kill してエラーを返す
-RECORD_STOP_TIMEOUT_SECONDS = 20
+# 録画を止める時に送るシグナルと、それぞれの待ち時間（秒）。
+# recordVideo は SIGINT でファイルを閉じて正常終了するが、起動直後は取りこぼす（実測 2026-08-17:
+# start 直後の stop が終わらず、クライアントがタイムアウトした）ため、間を置いてもう一度送る。
+# SIGKILL すると Simulator のホスト録画が Resource busy のまま残り、そのセッションでは以降の
+# record/start が全て失敗する（実測 2026-08-17）ため最後の手段にする
+RECORD_STOP_SIGNALS = (
+    (signal.SIGINT, 5), (signal.SIGINT, 10), (signal.SIGTERM, 5), (signal.SIGKILL, 5),
+)
 
 LAUNCH_ARG_PATTERN = re.compile(r"^[A-Za-z0-9_=-]+$")
 MAX_LAUNCH_ARGS = 16
@@ -233,18 +236,29 @@ class Agentd:
             return None
         recording["watchdog"].cancel()
         process = recording["process"]
-        if process.poll() is None:
-            # recordVideo は SIGINT でファイルを閉じて正常終了する
-            process.send_signal(signal.SIGINT)
-        try:
-            process.wait(timeout=RECORD_STOP_TIMEOUT_SECONDS)
-        except subprocess.TimeoutExpired:
-            process.kill()
-            process.wait()
-            return recording["path"], 0, f"{RECORD_STOP_TIMEOUT_SECONDS} 秒で録画を停止できず kill した（動画は壊れている可能性がある）"
+        stopped_by = self.terminate_recording(process)
         size = os.path.getsize(recording["path"]) if os.path.exists(recording["path"]) else 0
-        error = None if size > 0 else f"録画ファイルが空（simctl 終了コード {process.returncode}）: {self.tail_log(recording['log_path'])}"
+        if stopped_by != signal.SIGINT:
+            error = f"SIGINT で録画を停止できず {getattr(stopped_by, 'name', stopped_by)} まで進めた（動画は壊れている可能性がある）"
+        elif size == 0:
+            error = f"録画ファイルが空（simctl 終了コード {process.returncode}）: {self.tail_log(recording['log_path'])}"
+        else:
+            error = None
         return recording["path"], size, error
+
+    @staticmethod
+    def terminate_recording(process):
+        """録画プロセスを段階的に止め、実際に効いたシグナルを返す（既に終了していれば SIGINT 扱い）"""
+        if process.poll() is not None:
+            return signal.SIGINT
+        for stop_signal, wait_seconds in RECORD_STOP_SIGNALS:
+            process.send_signal(stop_signal)
+            try:
+                process.wait(timeout=wait_seconds)
+                return stop_signal
+            except subprocess.TimeoutExpired:
+                continue
+        return None
 
     @staticmethod
     def tail_log(path):

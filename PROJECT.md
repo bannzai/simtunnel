@@ -175,6 +175,8 @@ WDA では届かない領域（起動引数を要する状態の作り込み、�
 
 - **WDA / maestro のドライバ（`*.xctrunner`）も User アプリとして `listapps` に並ぶ**（実測 2026-08-17）。これを操作できると `relaunch` でセッション自体を殺せてしまうため、許可リストから除外している
 - **`push` が 200 を返しても、対象アプリが通知許可を得ていなければバナーは表示されない**（実測 2026-08-17。simtunnel のサンプルアプリは通知許可を要求しないため、`push` は成功するが画面には出ない）。バナーの発火を確認したいアプリ側では、通知許可を得た状態を作ってから `push` する
+- **`simctl io recordVideo` を SIGKILL すると、その runner のホスト録画が `Resource busy`（`Host recording is already in progress`）のまま残り、以降の `record/start` が全て失敗する**（実測 2026-08-17）。停止は SIGINT を間を置いて 2 回送り、SIGTERM を挟んでから SIGKILL する。この状態になったセッションでは runner 側の録画を諦め、ローカル側の `simtunnel record` を使う
+- **`record/start` の直後の `record/stop` は SIGINT を取りこぼす**（実測 2026-08-17）。runner 側の録画は、確認したい操作を挟んでから止める
 
 呼び出しはセッション名で直接 curl する（専用の CLI サブコマンドは持たない）:
 

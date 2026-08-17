@@ -7,6 +7,7 @@ simctl は PATH に置いたスタブ xcrun に差し替えるため、Simulator
 import importlib.util
 import json
 import os
+import signal
 import stat
 import sys
 import tempfile
@@ -24,7 +25,7 @@ spec.loader.exec_module(agentd_module)
 
 USER_BUNDLE_ID = "com.example.sample"
 SLOT_UDIDS = ["UDID-0", "UDID-1"]
-ORIGINAL_STOP_TIMEOUT_SECONDS = agentd_module.RECORD_STOP_TIMEOUT_SECONDS
+ORIGINAL_STOP_SIGNALS = agentd_module.RECORD_STOP_SIGNALS
 
 # 実 simctl の listapps と同じ OpenStep plist を返し、呼ばれた引数を argv ログへ残すスタブ
 XCRUN_STUB = r"""#!/bin/bash
@@ -172,18 +173,21 @@ class AgentdTestCase(unittest.TestCase):
         status, _ = self.post("/v1/record/stop", {"recordingId": second["recordingId"]})
         self.assertEqual(status, 200)
 
-    def test_record_stop_kills_process_that_ignores_sigint(self):
+    def test_record_stop_escalates_when_sigint_is_ignored(self):
         os.environ["XCRUN_RECORD_IGNORE_SIGINT"] = "1"
+        agentd_module.RECORD_STOP_SIGNALS = (
+            (signal.SIGINT, 1), (signal.SIGINT, 1), (signal.SIGTERM, 2), (signal.SIGKILL, 2),
+        )
         try:
             _, started = self.post("/v1/record/start", {})
-            agentd_module.RECORD_STOP_TIMEOUT_SECONDS = 2
             started_at = time.monotonic()
             status, body = self.post("/v1/record/stop", {"recordingId": started["recordingId"]})
         finally:
-            agentd_module.RECORD_STOP_TIMEOUT_SECONDS = ORIGINAL_STOP_TIMEOUT_SECONDS
+            agentd_module.RECORD_STOP_SIGNALS = ORIGINAL_STOP_SIGNALS
             del os.environ["XCRUN_RECORD_IGNORE_SIGINT"]
         # 応答を返さずクライアントをぶら下げたままにしない
         self.assertLess(time.monotonic() - started_at, 10)
+        # SIGINT で止まらなかった録画は、ファイルが残っていても成功として返さない
         self.assertEqual(status, 500, body)
 
     def test_record_start_failure_is_not_reported_as_success(self):
