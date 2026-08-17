@@ -196,6 +196,11 @@ jobs:
         timeout-minutes: 10
         run: ./simtunnel/runner/start-serve-sim.sh $SIMULATOR_UDIDS
 
+      # simctl の許可した動詞だけを遠隔実行できる受け口（参照: PROJECT.md「simtunnel-agentd」）
+      - name: simtunnel-agentd を起動
+        timeout-minutes: 5
+        run: ./simtunnel/runner/start-agentd.sh $SIMULATOR_UDIDS
+
       # キャッシュミス時のみ保存する。ジョブは down で cancel されるため、
       # post step 任せにせずビルド直後に明示的に保存する
       - name: WDA ビルドキャッシュを保存
@@ -215,12 +220,13 @@ jobs:
           tags: tag:ci
           hostname: simtunnel-${{ inputs.session }}
 
-      # serve-sim は preview UI とストリーム (/helper/<UDID>/stream.mjpeg) をどちらも :3200 で配信するため 3200 のみ公開する
+      # serve-sim は preview UI とストリーム (/helper/<UDID>/stream.mjpeg) をどちらも :3200 で配信するため 3200 のみ公開する。
+      # agentd は Simulator の台数によらず 1 プロセス（:8200）で全 slot を受ける
       - name: tailnet へブリッジ
         timeout-minutes: 10
         env:
           SIMULATORS: ${{ inputs.simulators }}
-          EXTRA_PORTS: ${{ inputs.serve_sim == 'true' && '3200' || '' }}
+          EXTRA_PORTS: ${{ inputs.serve_sim == 'true' && '3200 8200' || '8200' }}
         run: |
           PORTS=""
           for i in $(seq 0 $((SIMULATORS - 1))); do PORTS="$PORTS $((8100 + i)) $((9100 + i))"; done
@@ -241,6 +247,7 @@ jobs:
             for i in $(seq 0 $((SIMULATORS - 1))); do
               echo "- sim ${i}: WDA http://simtunnel-${SESSION}:$((8100 + i))/status / MJPEG http://simtunnel-${SESSION}:$((9100 + i))"
             done
+            echo "- agentd（許可した simctl 動詞）: http://simtunnel-${SESSION}:8200/status"
             if [ "$SERVE_SIM" = "true" ]; then
               echo "- preview UI（ブラウザ操作）: http://simtunnel-${SESSION}:3200"
               if [ "$SIMULATORS" -gt 1 ]; then

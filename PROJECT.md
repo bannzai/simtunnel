@@ -24,7 +24,8 @@ GitHub Actions (workflow_dispatch)
 │   ├─ iOS Simulator (iPhone 16 等)
 │   ├─ WebDriverAgent      :8100（操作 API）
 │   ├─ WDA MJPEG server    :9100（画面ストリーミング）
-│   ├─ socat bridge（tailscale IF → 127.0.0.1:8100/9100）
+│   ├─ simtunnel-agentd    :8200（許可した simctl 動詞のみ）
+│   ├─ socat bridge（tailscale IF → 127.0.0.1:8100/9100/8200）
 │   └─ tailscale（ephemeral node / hostname=simtunnel-a1 / tag:ci）
 ├─ Job (session=b1): 同上
 └─ Job (session=b2): 同上
@@ -101,6 +102,14 @@ Tailscale は無料の Personal プラン（デバイス 100 台）で成立す�
 8. **サードパーティ action は commit SHA で固定**: タグは可変で、action リポジトリが侵害されるとタグごと悪性コードへ差し替えられる。`uses:` はフルレングスの commit SHA + バージョンコメント（例: `actions/checkout@34e11487... # v4.3.1`）で固定する。GitHub 公式推奨の hardening（https://docs.github.com/en/actions/security-for-github-actions/security-guides/security-hardening-for-github-actions#using-third-party-actions ）。バージョン更新時は `gh api repos/<owner>/<repo>/git/ref/tags/<tag>` で SHA を確認して書き換える
 9. **runner スクリプトは workflow と同一 commit に固定**: reusable workflow（session.yml）は runner スクリプトを `job.workflow_repository` / `job.workflow_sha`（= 呼ばれた workflow ファイルの repo と commit SHA。`github.job_workflow_sha` というプロパティは存在しない）で checkout する。caller が `uses:` を SHA 固定していれば、実行されるスクリプトも同じ SHA に固定される
 
+#### 機能追加でこの前提を崩さないための判断基準
+
+公開エンドポイントゼロ・`workflow_dispatch` のみ・長期シークレットなし・`tag:ci` からの発信全拒否は、後から機能を足す時に崩れやすい。次の 3 つは**やらないこと**として固定する。
+
+- **WDA / agentd / serve-sim に認証を足して公開エンドポイントにする方向は採らない**。トークンを付けても、漏れた時点でシミュレータの完全な乗っ取りになる（無認証の操作 API が背後にいるため）。「到達できないこと」が唯一の安全根拠であり、認証はその代替にならない
+- **クライアントから受けた本文（シェルコマンド・スクリプト・Maestro flow YAML 等）を runner で実行する設計は採らない**。runner が実行してよいのは、リポジトリにコミット済みで ref（commit SHA）に固定された内容だけ。可変長の本文を受ける経路を 1 本でも開けると、動詞の許可リストは意味を失う
+- **新しい操作能力を足す時は「主体が増えるのか、能力が増えるだけか」を整理して設計判断に書く**。到達できる相手が増えない（= 既に WDA でシミュレータを完全操作できる tailnet 内の自分のデバイスだけ）なら能力の追加であり、この前提の範囲内。新しい主体が到達できるようになるなら、それは機能追加ではなく前提そのものの変更として扱う
+
 ### 操作レイヤー: 段階的に構築（mobile-mcp の fork はしない）
 
 mobile-mcp は調査の結果、WDA 接続先ハードコード + simctl ローカル直叩きの構造で、fork の改修範囲が広く upstream 追従コストも掛かる。代わりに:
@@ -123,7 +132,58 @@ WDA API は WebDriver 準拠 + 拡張で、必要な操作は全て HTTP で足�
 | URL を開く | `POST /session/:id/url` |
 | 画面ストリーミング | `:9100`（MJPEG。ブラウザ / ffplay で閲覧） |
 
-simctl が必要な操作（アプリの install / launch / terminate 等）は、Phase 1〜3 では workflow の step として GHA 側で実行し、Phase 4 で runner 上の小さな HTTP 受け口（simtunnel-agentd）に置き換える。
+simctl が必要な操作（アプリの launch / terminate、通知の合成等）は、Phase 1〜3 では workflow の step として GHA 側で実行していた。Phase 4 で runner 上の小さな HTTP 受け口（simtunnel-agentd）を足し、セッション開始後にも呼べるようにした（下記「simtunnel-agentd」）。
+
+### 画面の録画: `simtunnel record`
+
+`:9100` の MJPEG は連続ストリームなのに、`simtunnel screenshot` は 1 フレーム抽出しかしない。数秒で消える通知バナーの発火は、撮った瞬間に出ていなければ判別できない（実例: bannzai/mementomorning の初回 QA で、通知バナーの発火確認が「1 フレーム抽出では判別不能」となり判定不能になった）。ストリームをローカルに録り続ける経路を `local/simtunnel record` として足す。
+
+- **クライアント側で録る**（runner 側の `simctl io recordVideo` ではなく）。すでに tailnet に出ている MJPEG をそのまま保存するだけで済み、runner 側に新しい能力を足さずに解決する。録画ファイルは最初からローカルにあるため、DERP relay 越しに動画を取り出す必要もない
+- **録画中は再エンコードしない**。multipart のヘッダだけ落として JPEG フレームをそのまま追記保存する（`.mjpeg` = JPEG の連結）。ローカルの負荷はディスク書き込みが支配的で軽微。mp4 が要る場合だけ、録画終了後に `--mp4`（ffmpeg）で変換する
+- **MJPEG は実質 1 クライアント占有**（Phase 4 の serve-sim 実測と同じ制約）。録画中は `screenshot` / `preview` を併用できない
+- 録画からフレームを切り出す: `ffmpeg -f mjpeg -i <出力.mjpeg> -fps_mode passthrough ./tmp/frame-%04d.jpg`
+- 用途: 通知バナー発火の事後確認、E2E 操作の証跡、flaky の再現調査
+
+### simtunnel-agentd（許可リスト式の simctl 受け口）
+
+WDA では届かない領域（起動引数を要する状態の作り込み、通知の合成、権限の許可・拒否、ステータスバーの整形）を遠隔から作れるようにするため、runner 上に `:8200` の HTTP 受け口を置く。**任意コマンドの実行は実装しない。動詞を固定した許可リスト式**にする。
+
+| 動詞 | 対応する simctl | 用途 |
+| --- | --- | --- |
+| `POST /v1/relaunch` | `terminate` + `launch`（起動引数付き） | アプリ起動前に効かせる設定を要する状態の作り込み |
+| `POST /v1/push` | `push`（payload は JSON スキーマ検証） | 通知の合成・通知タップ検証 |
+| `POST /v1/record/start` / `/v1/record/stop` | `io recordVideo` | 必要区間だけの runner 側録画 |
+| `POST /v1/privacy` | `privacy grant/revoke/reset`（service は列挙型） | 権限拒否・許可状態の作り込み |
+| `POST /v1/status_bar` | `status_bar override/clear` | スクリーンショットの整形 |
+
+**主体は増えず、能力だけが増える**: `:8200` に到達できるのは、既に `:8100` の無認証 WDA でシミュレータを完全操作できる tailnet 内の自分のデバイスだけ。新しく到達できる相手は生まれないため、「機能追加でこの前提を崩さないための判断基準」の範囲内に収まる。
+
+安全側の設計（実装は `runner/agentd.py`、検証は `runner/test/test-agentd.py`）:
+
+- クライアントから**コマンド文字列・ファイルパス・スクリプト本文を一切受けない**。受けるのは動詞 + スキーマ検証済みの引数だけで、未知のキーが 1 つでもあれば 400 で拒否する
+- **UDID はサーバ側が解決する**。クライアントは `slot`（0 始まりの Simulator 番号）だけを送り、body に `udid` があれば拒否する
+- **bundleId はこのセッションで install したアプリだけ許可する**。許可リストは別ファイルで持たず、`simctl listapps` の `ApplicationType = User` から毎回引く（runner の Simulator は毎回まっさらなため、ユーザーアプリ = このセッションで install したアプリになる）
+- `relaunch` の起動引数は文字種 `[A-Za-z0-9_=-]`・16 個まで・1 個 64 文字までに制限する
+- `push` の payload は `aps` オブジェクト必須・入れ子 6 段まで・JSON の基本型のみ。宛先の決定をサーバ側に一本化するため、`Simulator Target Bundle` を含む payload は拒否する
+- `simctl spawn` / `openurl` / `keychain` / `addmedia` など、**シミュレータ内での任意実行やホストのファイル参照につながる動詞は追加しない**
+- 呼び出しの監査ログは runner ローカル（`$RUNNER_TEMP/agentd-audit.log`）にだけ記録する。HTTP サーバの既定のアクセスログも stderr ではなくこのファイルへ流し、public repo の run ログ・ステップサマリに値を出さない
+- **録画ファイルを転送するエンドポイントは持たない**。`record/stop` は runner 上のパスとサイズを返すだけにする。DERP relay 経由（実測 約 60KB/s）では動画の取り出しが現実的な時間で終わらず、ローカル側の録画は `simtunnel record` で足りるため
+
+呼び出しはセッション名で直接 curl する（専用の CLI サブコマンドは持たない）:
+
+```bash
+curl -s http://simtunnel-<session>:8200/status
+curl -s -X POST http://simtunnel-<session>:8200/v1/relaunch \
+  -H 'Content-Type: application/json' -d '{"slot": 0, "args": ["-UITEST", "1"]}'
+curl -s -X POST http://simtunnel-<session>:8200/v1/push \
+  -H 'Content-Type: application/json' -d '{"payload": {"aps": {"alert": "夜のふりかえりの時間です"}}}'
+curl -s -X POST http://simtunnel-<session>:8200/v1/privacy \
+  -H 'Content-Type: application/json' -d '{"action": "revoke", "service": "photos"}'
+curl -s -X POST http://simtunnel-<session>:8200/v1/status_bar \
+  -H 'Content-Type: application/json' -d '{"time": "09:41", "batteryLevel": 100}'
+```
+
+Tailscale ACL で宛先ポートを列挙している場合は、`8200` を許可対象に追加する（許可していないと tailnet 内からも到達できない）。
 
 ### macOS アプリ対応（issue #23）
 
@@ -211,6 +271,42 @@ SIMTUNNEL_REPO=<owner>/<repo> local/simtunnel up <session> --wait
 ```
 
 **既定 repo（`bannzai/simtunnel`）へのフォールバックはしない。** 対象 repo が決まらない場合はエラーで停止する。フォールバックすると `up` した repo と別の repo を検索することになり、`down` が「実行中 run はない」と冪等成功で空振りして runner を掴んだまま放置される（実測: bannzai/mementomorning で `up` したセッションを、`SIMTUNNEL_REPO` なしの `down` が既定 repo を見て取りこぼした）。同じ理由で、対象 repo は実行のたびに標準エラーへ表示する。
+
+#### 起動引数を caller から渡す: `workflow_dispatch` の `type: choice`（固定選択肢）
+
+セッション開始時から効かせたい起動引数（アプリ起動前に読まれる設定など。セッション開始後なら agentd の `relaunch` で足りる）は caller workflow から渡す。**自由入力（`type: string`）は採らない**。
+
+**推奨は `type: choice`（固定選択肢）方式**:
+
+- 選択肢に無い値は GitHub 側で dispatch が拒否されるため、自由文字列が workflow に流入する経路が構造的に無い
+- 選択肢の実値（実際に `simctl launch` へ渡す引数列）は workflow 内にハードコードし、input 値は選択肢のキーとしてだけ使う。`run:` への `${{ }}` 直接展開はしない
+- 1 ファイルに収まり、バリエーション追加は選択肢 1 行 + 対応する引数列の追記で済む
+
+```yaml
+on:
+  workflow_dispatch:
+    inputs:
+      launch_preset:
+        description: "起動引数のプリセット"
+        type: choice
+        default: none
+        options: [none, onboarding-done, premium]
+
+jobs:
+  session:
+    steps:
+      # input 値は case のキーとしてだけ使い、引数列は workflow 内のハードコードから選ぶ
+      - env:
+          LAUNCH_PRESET: ${{ inputs.launch_preset }}
+        run: |
+          case "$LAUNCH_PRESET" in
+            onboarding-done) ARGS=(-ONBOARDING_DONE 1) ;;
+            premium) ARGS=(-PREMIUM 1) ;;
+            *) ARGS=() ;;
+          esac
+```
+
+代替として「バリエーションごとに caller workflow を分ける」（ファイルそのものが許可リストになる）方式も同等の安全性を持つ。バリエーションが少なく、それぞれ別の名前で dispatch したい場合はこちらでもよい。
 
 #### ビルドに自由な step が必要なアプリ（Flutter 等）: build job 分割 + artifact 渡し
 
@@ -433,10 +529,13 @@ simtunnel/
 │   ├── start-wda.sh                  # iOS WDA を build-for-testing（キャッシュ対応）+ test-without-building で起動
 │   ├── start-wda-mac.sh              # WebDriverAgentMac を runner の GUI セッション上で起動（iOS 版の macOS 対応）
 │   ├── start-serve-sim.sh            # serve-sim を起動（ブラウザ操作 UI + ライブ映像を :3200 で配信）
+│   ├── agentd.py                     # simtunnel-agentd: 許可した simctl 動詞だけを :8200 で受ける HTTP サーバ
+│   ├── start-agentd.sh               # agentd.py をバックグラウンド起動して :8200 の応答を待つ
+│   ├── test/test-agentd.py           # agentd の許可リスト検証（xcrun をスタブに差し替えて実行）
 │   ├── bridge.sh                     # socat: tailscale IF → 指定ポート（直接到達可能ならスキップ）
 │   └── keepalive.sh                  # duration_minutes までジョブを維持（WDA 死活監視付き）
 ├── local/
-│   └── simtunnel                     # ローカル CLI: up / down / list / status / screenshot / preview / wait
+│   └── simtunnel                     # ローカル CLI: up / down / list / status / screenshot / record / preview / wait
 └── mcp/                              # simtunnel-mcp（index.mjs。SIMTUNNEL_WDA_URL で接続先指定）
 ```
 

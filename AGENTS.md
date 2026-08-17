@@ -12,7 +12,8 @@ GitHub Actions の macOS Runner 上で iOS Simulator + WebDriverAgent を起動�
 - workflow のトリガーは `workflow_dispatch` のみとする（fork PR に Secrets を渡さないため。参照: PROJECT.md 設計判断）
 
 ## セッション操作
-- `local/simtunnel` CLI を使う: `up <session> [--wait]` / `down <session>` / `list` / `status <session>` / `screenshot <session>`（オプションはスクリプト冒頭の使い方を参照）
+- `local/simtunnel` CLI を使う: `up <session> [--wait]` / `down <session>` / `list` / `status <session>` / `screenshot <session>` / `record <session>`（オプションはスクリプト冒頭の使い方を参照）
+- simctl を要する操作（起動引数付きの再起動・通知の合成・権限・ステータスバー）は runner の agentd に curl で送る（動詞と引数の仕様は PROJECT.md「simtunnel-agentd」参照）
 - 放置しても `duration_minutes`（既定 60 分）で自動終了する
 
 ## サンプルアプリ
@@ -22,6 +23,8 @@ GitHub Actions の macOS Runner 上で iOS Simulator + WebDriverAgent を起動�
 ## 検証
 - セッション疎通: `local/simtunnel status <session>` が HTTP 200 を返すこと
 - スクリーンショット: `local/simtunnel screenshot <session>` で ./tmp に保存して Read する。`GET /screenshot` は DERP relay 経由だと 1 分超かかるため使わない（参照: PROJECT.md「Phase 1 実測」）
+- 数秒で消える表示（通知バナー等）の確認: `local/simtunnel record <session>` で録画し、フレームを切り出して Read する。録画中は screenshot / preview を併用できない
+- agentd: `runner/test/test-agentd.py` が全て PASS すること。実セッションでは `http://simtunnel-<session>:8200/status` が HTTP 200 を返すこと
 
 <!-- ai-review-config begin -->
 <!--

@@ -7,8 +7,12 @@
 #   simtunnel list
 #   simtunnel status <session> [--slot 1]
 #   simtunnel screenshot <session> [出力パス] [--slot 1]
+#   simtunnel record <session> [出力パス] [--slot 1] [--duration 30] [--mp4]   # MJPEG を録画（数秒で消える通知バナー等の事後確認）
 #   simtunnel preview <session> [--slot 1]   # ブラウザで preview UI（見る + 操作）を開く
 #   simtunnel mcp-config <session> [ディレクトリ] [--name mobile] [--slot 1]   # ディレクトリ直下の .mcp.json に simtunnel MCP 設定を書き込む
+#
+# MJPEG は実質 1 クライアント占有のため、record 中は screenshot / preview と併用できない。
+# 録画からフレームを切り出す: ffmpeg -f mjpeg -i <出力.mjpeg> -fps_mode passthrough ./tmp/frame-%04d.jpg
 #
 # --slot は複数 Simulator セッション（up --simulators N）の i 台目 (0 始まり) を指す。WDA :8100+i / MJPEG :9100+i
 #
@@ -341,6 +345,84 @@ print(f"saved: {os.environ['OUT']} ({end + 2 - start} bytes)")
 EOF
 }
 
+# MJPEG (:9100) のストリームを録画する。1 フレーム抽出（screenshot）では捉えられない
+# 数秒で消える通知バナー等を事後確認するための経路。
+# 画像は再エンコードせず、multipart のヘッダだけ落として JPEG フレームをそのまま追記保存する
+# （ローカルの負荷はディスク書き込みが支配的）。mp4 が要る場合だけ録画終了後に ffmpeg で変換する
+cmd_record() {
+  local session=$1; shift
+  local out="" slot=0 duration=30 mp4=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --slot) slot=$2; shift 2 ;;
+      --duration) duration=$2; shift 2 ;;
+      --mp4) mp4=1; shift ;;
+      *) out=$1; shift ;;
+    esac
+  done
+  [[ "$duration" =~ ^[0-9]+$ ]] && [ "$duration" -ge 1 ] || {
+    echo "--duration は 1 以上の整数（秒）: ${duration}" >&2
+    return 1
+  }
+  if [ "$mp4" -eq 1 ] && ! command -v ffmpeg >/dev/null 2>&1; then
+    echo "--mp4 には ffmpeg が必要（brew install ffmpeg）" >&2
+    return 1
+  fi
+  [ -n "$out" ] || out="./tmp/simtunnel-${session}-$(date +%H%M%S).mjpeg"
+  local ip
+  ip=$(session_ip "$session")
+  [ -n "$ip" ] || { echo "simtunnel-${session} は tailnet に存在しない" >&2; return 1; }
+
+  mkdir -p "$(dirname "$out")"
+  echo "録画中（${duration} 秒 / slot ${slot}）... MJPEG は 1 クライアント占有のため screenshot / preview は同時に使えない"
+  # curl は --max-time で打ち切られると 28 を返すが、これは録画の正常終了なので失敗扱いにしない
+  local result
+  result=$({ curl -sN -m "$duration" "http://${ip}:$((9100 + slot))" || true; } | OUT="$out" python3 - <<'EOF'
+import os, sys, time
+start = time.time()
+frames = 0
+buf = b""
+with open(os.environ["OUT"], "wb") as out:
+    while True:
+        chunk = sys.stdin.buffer.read(65536)
+        if not chunk:
+            break
+        buf += chunk
+        while True:
+            begin = buf.find(b"\xff\xd8")
+            if begin < 0:
+                buf = buf[-1:]
+                break
+            end = buf.find(b"\xff\xd9", begin + 2)
+            if end < 0:
+                buf = buf[begin:]
+                break
+            out.write(buf[begin:end + 2])
+            frames += 1
+            buf = buf[end + 2:]
+if frames == 0:
+    print("フレームを取得できなかった。セッションの準備状態と、MJPEG を他のクライアントが掴んでいないかを確認", file=sys.stderr)
+    sys.exit(1)
+print(f"{frames} {time.time() - start:.1f}")
+EOF
+  ) || return 1
+
+  local frames elapsed fps
+  read -r frames elapsed <<<"$result"
+  fps=$(awk -v f="$frames" -v e="$elapsed" 'BEGIN {printf "%.2f", (e > 0 ? f / e : 0)}')
+  echo "saved: ${out} (${frames} フレーム / ${elapsed} 秒 / ${fps} fps / $(wc -c <"$out" | tr -d ' ') bytes)"
+
+  if [ "$mp4" -eq 1 ]; then
+    # フレーム間隔は実測の平均で近似する（ffmpeg は 0 fps を受け付けないため下限 1）
+    local mp4_out
+    mp4_out="${out%.*}.mp4"
+    ffmpeg -y -loglevel error -f mjpeg \
+      -framerate "$(awk -v r="$fps" 'BEGIN {printf "%.2f", (r >= 1 ? r : 1)}')" \
+      -i "$out" -pix_fmt yuv420p "$mp4_out" || { echo "mp4 への変換に失敗" >&2; return 1; }
+    echo "converted: ${mp4_out}"
+  fi
+}
+
 # 指定ディレクトリ（既定はカレント）直下の .mcp.json に simtunnel MCP サーバの設定を書き込む。
 # 既存の .mcp.json があれば対象サーバ名以外のエントリは保持してマージする（冪等）。
 # --name mobile にすると mcp__mobile__* のツール名になり、mobile-mcp 前提の既存 skill と互換になる
@@ -430,7 +512,7 @@ cmd_preview() {
 main() {
   local cmd=${1:-}
   case "$cmd" in
-    up|down|status|screenshot|wait|preview)
+    up|down|status|screenshot|record|wait|preview)
       [ $# -ge 2 ] || { echo "session 名を指定して: simtunnel ${cmd} <session>" >&2; exit 1; }
       shift
       "cmd_${cmd}" "$@"
@@ -444,7 +526,7 @@ main() {
       cmd_list
       ;;
     *)
-      sed -n '2,11p' "$0" | sed 's/^# \{0,1\}//'
+      sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'
       exit 1
       ;;
   esac
