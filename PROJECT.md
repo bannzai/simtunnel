@@ -169,6 +169,7 @@ WDA では届かない領域（起動引数を要する状態の作り込み、�
 - `simctl spawn` / `openurl` / `keychain` / `addmedia` など、**シミュレータ内での任意実行やホストのファイル参照につながる動詞は追加しない**
 - 呼び出しの監査ログは runner ローカル（`$RUNNER_TEMP/agentd-audit.log`）にだけ記録する。HTTP サーバの既定のアクセスログも stderr ではなくこのファイルへ流し、public repo の run ログ・ステップサマリに値を出さない
 - **録画ファイルを転送するエンドポイントは持たない**。`record/stop` は runner 上のパスとサイズを返すだけにする。DERP relay 経由（実測 約 60KB/s）では動画の取り出しが現実的な時間で終わらず、ローカル側の録画は `simtunnel record` で足りるため
+- **runner 側の録画は 1 slot につき 1 本・最長 10 分**。`record/start` は同じ slot の実行中の録画を止めてから始め、止め忘れた録画もサーバ側の watchdog が打ち切る。応答が届かず `recordingId` を受け取れなかったクライアントは録画を止められず、放っておくとジョブが終わるまで書き続けて runner のディスクを圧迫するため
 
 ハマりどころ:
 

@@ -27,6 +27,13 @@ SLOT_UDIDS = ["UDID-0", "UDID-1"]
 # 実 simctl の listapps と同じ OpenStep plist を返し、呼ばれた引数を argv ログへ残すスタブ
 XCRUN_STUB = r"""#!/bin/bash
 printf '%s\n' "$*" >> "$XCRUN_ARGV_LOG"
+if [ "${4:-}" = "recordVideo" ]; then
+  # 実際の recordVideo は SIGINT を受けるまで動き続け、出力ファイルを書く
+  [ "${XCRUN_RECORD_FAIL:-0}" = "1" ] && exit 1
+  printf 'fake video' > "${!#}"
+  trap 'exit 0' INT
+  while true; do sleep 0.1; done
+fi
 if [ "$2" = "listapps" ]; then
   cat <<'PLIST'
 {
@@ -150,7 +157,25 @@ class AgentdTestCase(unittest.TestCase):
         recording_id = body["recordingId"]
         status, body = self.post("/v1/record/stop", {"recordingId": recording_id})
         self.assertEqual(status, 200, body)
-        self.assertIn("bytes", body)
+        self.assertGreater(body["bytes"], 0)
+
+    def test_record_start_replaces_running_recording_on_same_slot(self):
+        # recordingId を受け取れなかったクライアントの録画を残さない
+        _, first = self.post("/v1/record/start", {"slot": 0})
+        _, second = self.post("/v1/record/start", {"slot": 0})
+        self.assertNotEqual(first["recordingId"], second["recordingId"])
+        status, _ = self.post("/v1/record/stop", {"recordingId": first["recordingId"]})
+        self.assertEqual(status, 400)
+        status, _ = self.post("/v1/record/stop", {"recordingId": second["recordingId"]})
+        self.assertEqual(status, 200)
+
+    def test_record_start_failure_is_not_reported_as_success(self):
+        os.environ["XCRUN_RECORD_FAIL"] = "1"
+        try:
+            status, body = self.post("/v1/record/start", {})
+        finally:
+            del os.environ["XCRUN_RECORD_FAIL"]
+        self.assertEqual(status, 500, body)
 
     # --- 許可外・不正入力が 4xx で拒否されること ------------------------
     def test_unknown_verb_is_rejected(self):
@@ -217,6 +242,9 @@ class AgentdTestCase(unittest.TestCase):
             ("/v1/privacy", {"action": "grant", "service": "keychain"}),
             ("/v1/privacy", {"action": "spawn", "service": "photos"}),
             ("/v1/status_bar", {"time": "not-a-time"}),
+            ("/v1/status_bar", {"time": "24:00"}),
+            ("/v1/status_bar", {"time": "12:60"}),
+            ("/v1/status_bar", {"time": "99:99"}),
             ("/v1/status_bar", {"wifiBars": 99}),
             ("/v1/status_bar", {"action": "override"}),
         ]

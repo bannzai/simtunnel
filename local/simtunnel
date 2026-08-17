@@ -368,12 +368,26 @@ cmd_record() {
     echo "--mp4 には ffmpeg が必要（brew install ffmpeg）" >&2
     return 1
   fi
-  [ -n "$out" ] || out="./tmp/simtunnel-${session}-$(date +%H%M%S).mjpeg"
+  # 既定名に slot を含める（複数 slot を同じ秒に並行録画すると同じファイルを奪い合うため）
+  [ -n "$out" ] || out="./tmp/simtunnel-${session}-slot${slot}-$(date +%H%M%S).mjpeg"
+  # --mp4 では ffmpeg の入力と出力を必ず別パスにする
+  # （出力パスに .mp4 を渡された時、録画先と変換先が同じファイルになるため）
+  local raw="$out" mp4_out=""
+  if [ "$mp4" -eq 1 ]; then
+    # 拡張子の除去はファイル名部分に「.」がある時だけ行う（"./tmp/rec" のような
+    # 拡張子なしパスで、ディレクトリ側の「.」を拡張子と誤認しないため）
+    local stem=$out
+    case "${out##*/}" in
+      *.*) stem="${out%.*}" ;;
+    esac
+    raw="${stem}.mjpeg"
+    mp4_out="${stem}.mp4"
+  fi
   local ip
   ip=$(session_ip "$session")
   [ -n "$ip" ] || { echo "simtunnel-${session} は tailnet に存在しない" >&2; return 1; }
 
-  mkdir -p "$(dirname "$out")"
+  mkdir -p "$(dirname "$raw")"
   echo "録画中（${duration} 秒 / slot ${slot}）... MJPEG は 1 クライアント占有のため screenshot / preview は同時に使えない"
   # ストリームを stdin で受けるため、抽出スクリプトは `python3 -` ではなく -c で渡す
   # （heredoc を stdin に載せると、python がスクリプトを読んだ時点で stdin を使い切る）
@@ -409,20 +423,18 @@ EOF
 
   # curl は --max-time で打ち切られると 28 を返すが、これは録画の正常終了なので失敗扱いにしない
   local result
-  result=$({ curl -sN -m "$duration" "http://${ip}:$((9100 + slot))" || true; } | OUT="$out" python3 -c "$extract") || return 1
+  result=$({ curl -sN -m "$duration" "http://${ip}:$((9100 + slot))" || true; } | OUT="$raw" python3 -c "$extract") || return 1
 
   local frames elapsed fps
   read -r frames elapsed <<<"$result"
   fps=$(awk -v f="$frames" -v e="$elapsed" 'BEGIN {printf "%.2f", (e > 0 ? f / e : 0)}')
-  echo "saved: ${out} (${frames} フレーム / ${elapsed} 秒 / ${fps} fps / $(wc -c <"$out" | tr -d ' ') bytes)"
+  echo "saved: ${raw} (${frames} フレーム / ${elapsed} 秒 / ${fps} fps / $(wc -c <"$raw" | tr -d ' ') bytes)"
 
   if [ "$mp4" -eq 1 ]; then
     # フレーム間隔は実測の平均で近似する（ffmpeg は 0 fps を受け付けないため下限 1）
-    local mp4_out
-    mp4_out="${out%.*}.mp4"
     ffmpeg -y -loglevel error -f mjpeg \
       -framerate "$(awk -v r="$fps" 'BEGIN {printf "%.2f", (r >= 1 ? r : 1)}')" \
-      -i "$out" -pix_fmt yuv420p "$mp4_out" || { echo "mp4 への変換に失敗" >&2; return 1; }
+      -i "$raw" -pix_fmt yuv420p "$mp4_out" || { echo "mp4 への変換に失敗" >&2; return 1; }
     echo "converted: ${mp4_out}"
   fi
 }

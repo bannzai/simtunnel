@@ -15,12 +15,16 @@ import shlex
 import signal
 import subprocess
 import sys
+import threading
 import time
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 MAX_BODY_BYTES = 16 * 1024
 SIMCTL_TIMEOUT_SECONDS = 60
+# recordingId を受け取れなかったクライアントは録画を止められない。ジョブが終わるまで
+# 書き続けて runner のディスクを圧迫しないよう、サーバ側で必ず打ち切る
+MAX_RECORDING_SECONDS = 600
 
 LAUNCH_ARG_PATTERN = re.compile(r"^[A-Za-z0-9_=-]+$")
 MAX_LAUNCH_ARGS = 16
@@ -35,7 +39,7 @@ PRIVACY_SERVICES = (
 )
 PRIVACY_ACTIONS = ("grant", "revoke", "reset")
 
-STATUS_BAR_TIME_PATTERN = re.compile(r"^[0-9]{1,2}:[0-9]{2}$")
+STATUS_BAR_TIME_PATTERN = re.compile(r"^([01]?[0-9]|2[0-3]):[0-5][0-9]$")
 # status_bar override のオプション名 -> 値の検証器
 STATUS_BAR_OPTIONS = {
     "time": lambda v: isinstance(v, str) and bool(STATUS_BAR_TIME_PATTERN.match(v)),
@@ -72,7 +76,9 @@ class Agentd:
         self.work_dir = work_dir
         os.makedirs(self.work_dir, exist_ok=True)
         self.audit_path = os.path.join(self.work_dir, "agentd-audit.log")
+        # recordingId -> 実行中の録画。watchdog スレッドからも触るためロックで守る
         self.recordings = {}
+        self.recordings_lock = threading.Lock()
 
     # --- 監査ログ -------------------------------------------------------
     # public repo では run のログ・ステップサマリを誰でも読めるため、呼び出しの記録は
@@ -211,32 +217,78 @@ class Agentd:
             os.remove(path)
         return {"bundleId": bundle_id}
 
-    def verb_record_start(self, body):
-        self.reject_unknown_keys(body, ("slot",))
-        udid = self.udid(body)
-        recording_id = uuid.uuid4().hex
-        path = os.path.join(self.work_dir, f"agentd-record-{recording_id}.mp4")
-        process = subprocess.Popen(
-            ["xcrun", "simctl", "io", udid, "recordVideo", "--codec", "h264", "--force", path],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        )
-        self.recordings[recording_id] = (process, path)
-        return {"recordingId": recording_id, "path": path}
-
-    def verb_record_stop(self, body):
-        self.reject_unknown_keys(body, ("recordingId",))
-        recording_id = body.get("recordingId")
-        if not isinstance(recording_id, str) or recording_id not in self.recordings:
-            raise RequestError(400, "recordingId が不正（record/start が返した値を渡す）")
-        process, path = self.recordings.pop(recording_id)
-        # recordVideo は SIGINT でファイルを閉じて正常終了する
-        process.send_signal(signal.SIGINT)
+    def stop_recording(self, recording_id):
+        """録画プロセスを止めて (出力パス, バイト数, エラー内容) を返す。停止済みなら None"""
+        with self.recordings_lock:
+            recording = self.recordings.pop(recording_id, None)
+        if recording is None:
+            return None
+        recording["watchdog"].cancel()
+        process = recording["process"]
+        if process.poll() is None:
+            # recordVideo は SIGINT でファイルを閉じて正常終了する
+            process.send_signal(signal.SIGINT)
         try:
             process.wait(timeout=SIMCTL_TIMEOUT_SECONDS)
         except subprocess.TimeoutExpired:
             process.kill()
-            raise RequestError(500, "録画の停止がタイムアウトした")
-        size = os.path.getsize(path) if os.path.exists(path) else 0
+            process.wait()
+            return recording["path"], 0, "録画の停止がタイムアウトした"
+        size = os.path.getsize(recording["path"]) if os.path.exists(recording["path"]) else 0
+        error = None if size > 0 else f"録画ファイルが空（simctl 終了コード {process.returncode}）: {self.tail_log(recording['log_path'])}"
+        return recording["path"], size, error
+
+    @staticmethod
+    def tail_log(path):
+        if not os.path.exists(path):
+            return ""
+        with open(path, "rb") as f:
+            return f.read()[-500:].decode("utf-8", "replace").strip()
+
+    def verb_record_start(self, body):
+        self.reject_unknown_keys(body, ("slot",))
+        udid = self.udid(body)
+        slot = body.get("slot", 0)
+        # 1 slot につき 1 本に限る。recordingId を受け取れなかったクライアントが止められない
+        # 録画を残しても、次の start で回収できる
+        for running_id, recording in list(self.recordings.items()):
+            if recording["slot"] == slot:
+                self.stop_recording(running_id)
+
+        recording_id = uuid.uuid4().hex
+        path = os.path.join(self.work_dir, f"agentd-record-{recording_id}.mp4")
+        log_path = path + ".log"
+        with open(log_path, "wb") as log:
+            process = subprocess.Popen(
+                ["xcrun", "simctl", "io", udid, "recordVideo", "--codec", "h264", "--force", path],
+                stdout=log, stderr=log,
+            )
+        watchdog = threading.Timer(MAX_RECORDING_SECONDS, self.stop_recording, args=(recording_id,))
+        watchdog.daemon = True
+        with self.recordings_lock:
+            self.recordings[recording_id] = {
+                "process": process, "path": path, "slot": slot, "log_path": log_path, "watchdog": watchdog,
+            }
+        watchdog.start()
+
+        # Popen はコマンドの起動に成功しただけで返る。simctl が即座に失敗した場合を成功として返さない
+        time.sleep(1)
+        if process.poll() is not None:
+            self.stop_recording(recording_id)
+            raise RequestError(500, f"録画を開始できなかった: {self.tail_log(log_path)}")
+        return {"recordingId": recording_id, "path": path, "maxSeconds": MAX_RECORDING_SECONDS}
+
+    def verb_record_stop(self, body):
+        self.reject_unknown_keys(body, ("recordingId",))
+        recording_id = body.get("recordingId")
+        if not isinstance(recording_id, str):
+            raise RequestError(400, "recordingId が不正（record/start が返した値を渡す）")
+        stopped = self.stop_recording(recording_id)
+        if stopped is None:
+            raise RequestError(400, "この recordingId の録画は実行中ではない（停止済み・上限時間で自動停止・不正な値）")
+        path, size, error = stopped
+        if error:
+            raise RequestError(500, error)
         # 動画は runner ローカルに残す。DERP 経由の帯域では取り出しに現実的な時間がかからないため、
         # 転送用のエンドポイントは持たない（参照: PROJECT.md「simtunnel-agentd」）
         return {"path": path, "bytes": size}
