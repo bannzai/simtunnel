@@ -421,9 +421,22 @@ if frames == 0:
 print(f"{frames} {time.time() - start:.1f}")
 EOF
 
-  # curl は --max-time で打ち切られると 28 を返すが、これは録画の正常終了なので失敗扱いにしない
-  local result
-  result=$({ curl -sN -m "$duration" "http://${ip}:$((9100 + slot))" || true; } | OUT="$raw" python3 -c "$extract") || return 1
+  # curl の終了コードはパイプの中で失われるためファイルに落として後で判定する
+  local curl_exit_file="${raw}.curl-exit" stats_file="${raw}.stats" extract_ok=1
+  { curl -sN -m "$duration" "http://${ip}:$((9100 + slot))"; echo $? >"$curl_exit_file"; } \
+    | OUT="$raw" python3 -c "$extract" >"$stats_file" || extract_ok=0
+  local result curl_exit
+  result=$(cat "$stats_file")
+  curl_exit=$(cat "$curl_exit_file")
+  rm -f "$curl_exit_file" "$stats_file"
+  [ "$extract_ok" -eq 1 ] || return 1
+
+  # 28 は --max-time による打ち切り = 指定時間ぶん録れたということ。それ以外の失敗は
+  # 途中でストリームが切れているため、短い録画を成功として報告しない
+  if [ "$curl_exit" != "0" ] && [ "$curl_exit" != "28" ]; then
+    echo "録画中にストリームが切れた（curl 終了コード ${curl_exit}）。途中までの録画: ${raw}" >&2
+    return 1
+  fi
 
   local frames elapsed fps
   read -r frames elapsed <<<"$result"

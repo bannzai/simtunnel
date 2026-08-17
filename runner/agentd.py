@@ -79,6 +79,9 @@ class Agentd:
         # recordingId -> 実行中の録画。watchdog スレッドからも触るためロックで守る
         self.recordings = {}
         self.recordings_lock = threading.Lock()
+        # 「同じ slot の録画を止めてから登録する」を直列化する（ThreadingHTTPServer は
+        # リクエストを並行処理するため、確認と登録の間に別の start が割り込むと 1 slot 2 本になる）
+        self.record_start_lock = threading.Lock()
 
     # --- 監査ログ -------------------------------------------------------
     # public repo では run のログ・ステップサマリを誰でも読めるため、呼び出しの記録は
@@ -249,33 +252,35 @@ class Agentd:
         self.reject_unknown_keys(body, ("slot",))
         udid = self.udid(body)
         slot = body.get("slot", 0)
-        # 1 slot につき 1 本に限る。recordingId を受け取れなかったクライアントが止められない
-        # 録画を残しても、次の start で回収できる
-        for running_id, recording in list(self.recordings.items()):
-            if recording["slot"] == slot:
-                self.stop_recording(running_id)
-
         recording_id = uuid.uuid4().hex
         path = os.path.join(self.work_dir, f"agentd-record-{recording_id}.mp4")
         log_path = path + ".log"
-        with open(log_path, "wb") as log:
-            process = subprocess.Popen(
-                ["xcrun", "simctl", "io", udid, "recordVideo", "--codec", "h264", "--force", path],
-                stdout=log, stderr=log,
-            )
-        watchdog = threading.Timer(MAX_RECORDING_SECONDS, self.stop_recording, args=(recording_id,))
-        watchdog.daemon = True
-        with self.recordings_lock:
-            self.recordings[recording_id] = {
-                "process": process, "path": path, "slot": slot, "log_path": log_path, "watchdog": watchdog,
-            }
-        watchdog.start()
+        with self.record_start_lock:
+            # 1 slot につき 1 本に限る。recordingId を受け取れなかったクライアントが止められない
+            # 録画を残しても、次の start で回収できる
+            for running_id, recording in list(self.recordings.items()):
+                if recording["slot"] == slot:
+                    self.stop_recording(running_id)
 
-        # Popen はコマンドの起動に成功しただけで返る。simctl が即座に失敗した場合を成功として返さない
-        time.sleep(1)
-        if process.poll() is not None:
-            self.stop_recording(recording_id)
-            raise RequestError(500, f"録画を開始できなかった: {self.tail_log(log_path)}")
+            with open(log_path, "wb") as log:
+                process = subprocess.Popen(
+                    ["xcrun", "simctl", "io", udid, "recordVideo", "--codec", "h264", "--force", path],
+                    stdout=log, stderr=log,
+                )
+            watchdog = threading.Timer(MAX_RECORDING_SECONDS, self.stop_recording, args=(recording_id,))
+            watchdog.daemon = True
+            with self.recordings_lock:
+                self.recordings[recording_id] = {
+                    "process": process, "path": path, "slot": slot, "log_path": log_path, "watchdog": watchdog,
+                }
+            watchdog.start()
+
+            # Popen はコマンドの起動に成功しただけで返る。simctl が即座に失敗した場合を成功として返さない。
+            # 起動確認までロック内で行い、この録画が確定する前に同じ slot の start が割り込まないようにする
+            time.sleep(1)
+            if process.poll() is not None:
+                self.stop_recording(recording_id)
+                raise RequestError(500, f"録画を開始できなかった: {self.tail_log(log_path)}")
         return {"recordingId": recording_id, "path": path, "maxSeconds": MAX_RECORDING_SECONDS}
 
     def verb_record_stop(self, body):
