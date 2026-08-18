@@ -26,13 +26,17 @@ SIMCTL_TIMEOUT_SECONDS = 60
 # 書き続けて runner のディスクを圧迫しないよう、サーバ側で必ず打ち切る
 MAX_RECORDING_SECONDS = 600
 # 録画を止める時に送るシグナルと、それぞれの待ち時間（秒）。
-# recordVideo は SIGINT でファイルを閉じて正常終了するが、起動直後は取りこぼす（実測 2026-08-17:
-# start 直後の stop が終わらず、クライアントがタイムアウトした）ため、間を置いてもう一度送る。
-# SIGKILL すると Simulator のホスト録画が Resource busy のまま残り、そのセッションでは以降の
-# record/start が全て失敗する（実測 2026-08-17）ため最後の手段にする
+# recordVideo をきれいに終わらせられるのは SIGINT だけで、SIGTERM / SIGKILL で落とすと
+# Simulator のホスト録画が Resource busy のまま残り、そのセッションでは以降の record/start が
+# 全て失敗する（実測 2026-08-17: SIGTERM でも SIGKILL でも同じ状態になった）。
+# そのため SIGINT を間を置いて繰り返し、SIGKILL は「放置するとディスクを食い潰す」場合の最後の手段にする
 RECORD_STOP_SIGNALS = (
-    (signal.SIGINT, 5), (signal.SIGINT, 10), (signal.SIGTERM, 5), (signal.SIGKILL, 5),
+    (signal.SIGINT, 3), (signal.SIGINT, 5), (signal.SIGINT, 10), (signal.SIGINT, 15), (signal.SIGKILL, 5),
 )
+# 録画が実際に始まった（= simctl が SIGINT を受け付ける状態になった）ことを確認するまでの上限。
+# Popen 直後は simctl がまだハンドラを張っておらず SIGINT を取りこぼす（実測 2026-08-17）ため、
+# 出力ファイルが書かれるまで待ってから start の応答を返す
+RECORD_READY_TIMEOUT_SECONDS = 20
 
 LAUNCH_ARG_PATTERN = re.compile(r"^[A-Za-z0-9_=-]+$")
 MAX_LAUNCH_ARGS = 16
@@ -308,12 +312,20 @@ class Agentd:
                 }
             watchdog.start()
 
-            # Popen はコマンドの起動に成功しただけで返る。simctl が即座に失敗した場合を成功として返さない。
-            # 起動確認までロック内で行い、この録画が確定する前に同じ slot の start が割り込まないようにする
-            time.sleep(1)
-            if process.poll() is not None:
-                self.stop_recording(recording_id)
-                raise RequestError(500, f"録画を開始できなかった: {self.tail_log(log_path)}")
+            # Popen はコマンドの起動に成功しただけで返る。録画が実際に始まる（出力ファイルが書かれる）
+            # までロック内で待ち、simctl の失敗を成功として返さない。ここで待つことは
+            # 「SIGINT を受け付ける状態になってから応答する」ことでもあり、直後の stop の取りこぼしも防ぐ
+            deadline = time.monotonic() + RECORD_READY_TIMEOUT_SECONDS
+            while True:
+                if process.poll() is not None:
+                    self.stop_recording(recording_id)
+                    raise RequestError(500, f"録画を開始できなかった: {self.tail_log(log_path)}")
+                if os.path.exists(path) and os.path.getsize(path) > 0:
+                    break
+                if time.monotonic() >= deadline:
+                    self.stop_recording(recording_id)
+                    raise RequestError(500, f"{RECORD_READY_TIMEOUT_SECONDS} 秒待っても録画が始まらなかった: {self.tail_log(log_path)}")
+                time.sleep(0.5)
         return {"recordingId": recording_id, "path": path, "maxSeconds": MAX_RECORDING_SECONDS}
 
     def verb_record_stop(self, body):

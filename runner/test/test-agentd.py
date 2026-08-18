@@ -26,6 +26,7 @@ spec.loader.exec_module(agentd_module)
 USER_BUNDLE_ID = "com.example.sample"
 SLOT_UDIDS = ["UDID-0", "UDID-1"]
 ORIGINAL_STOP_SIGNALS = agentd_module.RECORD_STOP_SIGNALS
+ORIGINAL_READY_TIMEOUT_SECONDS = agentd_module.RECORD_READY_TIMEOUT_SECONDS
 
 # 実 simctl の listapps と同じ OpenStep plist を返し、呼ばれた引数を argv ログへ残すスタブ
 XCRUN_STUB = r"""#!/bin/bash
@@ -33,7 +34,7 @@ printf '%s\n' "$*" >> "$XCRUN_ARGV_LOG"
 if [ "${4:-}" = "recordVideo" ]; then
   # 実際の recordVideo は SIGINT を受けるまで動き続け、出力ファイルを書く
   [ "${XCRUN_RECORD_FAIL:-0}" = "1" ] && exit 1
-  printf 'fake video' > "${!#}"
+  if [ "${XCRUN_RECORD_NEVER_READY:-0}" != "1" ]; then printf 'fake video' > "${!#}"; fi
   # 起動直後の停止で SIGINT を取りこぼす実機の挙動を再現する
   [ "${XCRUN_RECORD_IGNORE_SIGINT:-0}" = "1" ] && trap '' INT || trap 'exit 0' INT
   while true; do sleep 0.1; done
@@ -214,6 +215,17 @@ class AgentdTestCase(unittest.TestCase):
         # 応答を返さずクライアントをぶら下げたままにしない
         self.assertLess(time.monotonic() - started_at, 10)
         # SIGINT で止まらなかった録画は、ファイルが残っていても成功として返さない
+        self.assertEqual(status, 500, body)
+
+    def test_record_start_fails_when_recording_never_starts(self):
+        # simctl のプロセスは生きているが録画が始まらない場合を成功として返さない
+        os.environ["XCRUN_RECORD_NEVER_READY"] = "1"
+        agentd_module.RECORD_READY_TIMEOUT_SECONDS = 2
+        try:
+            status, body = self.post("/v1/record/start", {})
+        finally:
+            agentd_module.RECORD_READY_TIMEOUT_SECONDS = ORIGINAL_READY_TIMEOUT_SECONDS
+            del os.environ["XCRUN_RECORD_NEVER_READY"]
         self.assertEqual(status, 500, body)
 
     def test_record_start_failure_is_not_reported_as_success(self):
