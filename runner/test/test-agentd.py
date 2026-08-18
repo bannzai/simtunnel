@@ -34,7 +34,9 @@ printf '%s\n' "$*" >> "$XCRUN_ARGV_LOG"
 if [ "${4:-}" = "recordVideo" ]; then
   # 実際の recordVideo は SIGINT を受けるまで動き続け、出力ファイルを書く
   [ "${XCRUN_RECORD_FAIL:-0}" = "1" ] && exit 1
-  if [ "${XCRUN_RECORD_NEVER_READY:-0}" != "1" ]; then printf 'fake video' > "${!#}"; fi
+  # 実際の simctl は録画開始時に "Recording started" を出し、出力ファイルは終了時に書く
+  [ "${XCRUN_RECORD_NEVER_READY:-0}" != "1" ] && echo "Recording started"
+  printf 'fake video' > "${!#}"
   # 起動直後の停止で SIGINT を取りこぼす実機の挙動を再現する
   [ "${XCRUN_RECORD_IGNORE_SIGINT:-0}" = "1" ] && trap '' INT || trap 'exit 0' INT
   while true; do sleep 0.1; done

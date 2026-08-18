@@ -35,8 +35,10 @@ RECORD_STOP_SIGNALS = (
 )
 # 録画が実際に始まった（= simctl が SIGINT を受け付ける状態になった）ことを確認するまでの上限。
 # Popen 直後は simctl がまだハンドラを張っておらず SIGINT を取りこぼす（実測 2026-08-17）ため、
-# 出力ファイルが書かれるまで待ってから start の応答を返す
+# simctl が下記の行を出すまで待ってから start の応答を返す。
+# 出力ファイルは録画の終了時にまとめて書かれるので開始の判定には使えない（実測 2026-08-17）
 RECORD_READY_TIMEOUT_SECONDS = 20
+RECORD_READY_LOG_LINE = "Recording started"
 
 LAUNCH_ARG_PATTERN = re.compile(r"^[A-Za-z0-9_=-]+$")
 MAX_LAUNCH_ARGS = 16
@@ -320,7 +322,7 @@ class Agentd:
                 if process.poll() is not None:
                     self.stop_recording(recording_id)
                     raise RequestError(500, f"録画を開始できなかった: {self.tail_log(log_path)}")
-                if os.path.exists(path) and os.path.getsize(path) > 0:
+                if RECORD_READY_LOG_LINE in self.tail_log(log_path):
                     break
                 if time.monotonic() >= deadline:
                     self.stop_recording(recording_id)
