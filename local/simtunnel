@@ -374,11 +374,12 @@ cmd_record() {
   # （出力パスに .mp4 を渡された時、録画先と変換先が同じファイルになるため）
   local raw="$out" mp4_out=""
   if [ "$mp4" -eq 1 ]; then
-    # 拡張子の除去はファイル名部分に「.」がある時だけ行う（"./tmp/rec" のような
-    # 拡張子なしパスで、ディレクトリ側の「.」を拡張子と誤認しないため）
+    # 拡張子の除去はファイル名の 2 文字目以降に「.」がある時だけ行う。
+    # ディレクトリ側の「.」を拡張子と誤認せず（"./tmp/rec"）、
+    # 隠しファイル名の先頭のドットも拡張子として食わない（"./tmp/.record"）
     local stem=$out
     case "${out##*/}" in
-      *.*) stem="${out%.*}" ;;
+      ?*.*) stem="${out%.*}" ;;
     esac
     raw="${stem}.mjpeg"
     mp4_out="${stem}.mp4"
@@ -440,6 +441,13 @@ EOF
 
   local frames elapsed fps
   read -r frames elapsed <<<"$result"
+
+  # 終了コード 0（サーバ側が正常にストリームを閉じた）でも、指定時間ぶん録れたとは限らない。
+  # WDA / Simulator の再起動で途中終了した録画を、確認対象が写っている証跡として扱わない
+  if awk -v e="$elapsed" -v d="$duration" 'BEGIN {exit !(e < d - 1)}'; then
+    echo "指定した ${duration} 秒に対して ${elapsed} 秒で MJPEG が終了した（WDA / Simulator の状態を確認）。途中までの録画: ${raw}" >&2
+    return 1
+  fi
   fps=$(awk -v f="$frames" -v e="$elapsed" 'BEGIN {printf "%.2f", (e > 0 ? f / e : 0)}')
   echo "saved: ${raw} (${frames} フレーム / ${elapsed} 秒 / ${fps} fps / $(wc -c <"$raw" | tr -d ' ') bytes)"
 

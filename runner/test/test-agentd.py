@@ -173,6 +173,32 @@ class AgentdTestCase(unittest.TestCase):
         status, _ = self.post("/v1/record/stop", {"recordingId": second["recordingId"]})
         self.assertEqual(status, 200)
 
+    def test_record_start_waits_for_slow_stop_on_same_slot(self):
+        """停止待ちの最中に同じ slot の start が走ると simctl が Resource busy で失敗するため、
+        stop の完了まで start を待たせる"""
+        os.environ["XCRUN_RECORD_IGNORE_SIGINT"] = "1"
+        agentd_module.RECORD_STOP_SIGNALS = ((signal.SIGINT, 2), (signal.SIGKILL, 2))
+        try:
+            _, first = self.post("/v1/record/start", {"slot": 0})
+            os.environ["XCRUN_RECORD_IGNORE_SIGINT"] = "0"
+            stop_finished_at = []
+
+            def stop():
+                self.post("/v1/record/stop", {"recordingId": first["recordingId"]})
+                stop_finished_at.append(time.monotonic())
+
+            stopper = threading.Thread(target=stop)
+            stopper.start()
+            time.sleep(0.3)  # stop が停止待ちに入ってから start を投げる
+            self.post("/v1/record/start", {"slot": 0})
+            start_returned_at = time.monotonic()
+            stopper.join(timeout=15)
+        finally:
+            agentd_module.RECORD_STOP_SIGNALS = ORIGINAL_STOP_SIGNALS
+            os.environ.pop("XCRUN_RECORD_IGNORE_SIGINT", None)
+        self.assertTrue(stop_finished_at, "stop が完了しなかった")
+        self.assertLess(stop_finished_at[0], start_returned_at)
+
     def test_record_stop_escalates_when_sigint_is_ignored(self):
         os.environ["XCRUN_RECORD_IGNORE_SIGINT"] = "1"
         agentd_module.RECORD_STOP_SIGNALS = (

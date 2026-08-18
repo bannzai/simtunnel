@@ -87,9 +87,10 @@ class Agentd:
         # recordingId -> 実行中の録画。watchdog スレッドからも触るためロックで守る
         self.recordings = {}
         self.recordings_lock = threading.Lock()
-        # 「同じ slot の録画を止めてから登録する」を直列化する（ThreadingHTTPServer は
-        # リクエストを並行処理するため、確認と登録の間に別の start が割り込むと 1 slot 2 本になる）
-        self.record_start_lock = threading.Lock()
+        # slot ごとの録画の停止・開始を直列化する（ThreadingHTTPServer はリクエストを並行処理するため、
+        # 停止待ちの最中に start が割り込むと simctl が Host recording is already in progress で失敗する）。
+        # start が保持したまま stop_recording を呼ぶため再入可能にする
+        self.slot_locks = {slot: threading.RLock() for slot in range(len(self.udids))}
 
     # --- 監査ログ -------------------------------------------------------
     # public repo では run のログ・ステップサマリを誰でも読めるため、呼び出しの記録は
@@ -229,11 +230,24 @@ class Agentd:
         return {"bundleId": bundle_id}
 
     def stop_recording(self, recording_id):
-        """録画プロセスを止めて (出力パス, バイト数, エラー内容) を返す。停止済みなら None"""
+        """録画プロセスを止めて (出力パス, バイト数, エラー内容) を返す。停止済みなら None。
+
+        プロセスが実際に終了するまで slot のロックを保持し、停止待ちの最中に
+        同じ slot の start が走らないようにする"""
         with self.recordings_lock:
-            recording = self.recordings.pop(recording_id, None)
-        if recording is None:
+            slot = self.recordings[recording_id]["slot"] if recording_id in self.recordings else None
+        if slot is None:
             return None
+        with self.slot_locks[slot]:
+            # ロック待ちの間に別のスレッドが停止し終えている場合がある
+            with self.recordings_lock:
+                recording = self.recordings.pop(recording_id, None)
+            if recording is None:
+                return None
+            return self.finish_recording(recording)
+
+    def finish_recording(self, recording):
+        """停止対象から外した録画を実際に終了させ、(出力パス, バイト数, エラー内容) を返す"""
         recording["watchdog"].cancel()
         process = recording["process"]
         stopped_by = self.terminate_recording(process)
@@ -274,7 +288,7 @@ class Agentd:
         recording_id = uuid.uuid4().hex
         path = os.path.join(self.work_dir, f"agentd-record-{recording_id}.mp4")
         log_path = path + ".log"
-        with self.record_start_lock:
+        with self.slot_locks[slot]:
             # 1 slot につき 1 本に限る。recordingId を受け取れなかったクライアントが止められない
             # 録画を残しても、次の start で回収できる
             for running_id, recording in list(self.recordings.items()):
