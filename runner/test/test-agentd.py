@@ -4,6 +4,7 @@
 simctl は PATH に置いたスタブ xcrun に差し替えるため、Simulator が無くても実行できる。
 実行: python3 runner/test/test-agentd.py
 """
+import http.client
 import importlib.util
 import json
 import os
@@ -86,6 +87,8 @@ class AgentdTestCase(unittest.TestCase):
 
     @classmethod
     def tearDownClass(cls):
+        # 停止しないまま終わったテストの録画スタブが残らないよう回収する
+        cls.server.agentd.stop_all_recordings()
         cls.server.shutdown()
         cls.server.server_close()
         cls.thread.join(timeout=5)
@@ -330,6 +333,38 @@ class AgentdTestCase(unittest.TestCase):
             urllib.request.urlopen(request, timeout=10)
         with caught.exception:
             self.assertEqual(caught.exception.code, 400)
+
+    def test_missing_or_invalid_content_length_is_rejected(self):
+        # 本文を読めない形式のまま既定値で動詞を実行しない
+        connection = http.client.HTTPConnection("127.0.0.1", self.server.server_address[1], timeout=10)
+        connection.putrequest("POST", "/v1/relaunch", skip_accept_encoding=True)
+        connection.endheaders()  # Content-Length も Transfer-Encoding も無い
+        self.assertEqual(connection.getresponse().status, 411)
+        connection.close()
+
+        connection = http.client.HTTPConnection("127.0.0.1", self.server.server_address[1], timeout=10)
+        connection.putrequest("POST", "/v1/relaunch", skip_accept_encoding=True)
+        connection.putheader("Content-Length", "-1")
+        connection.endheaders()
+        self.assertEqual(connection.getresponse().status, 400)
+        connection.close()
+        self.assertEqual(self.simctl_calls(), [])
+
+    def test_chunked_body_is_rejected(self):
+        connection = http.client.HTTPConnection("127.0.0.1", self.server.server_address[1], timeout=10)
+        connection.putrequest("POST", "/v1/relaunch", skip_accept_encoding=True)
+        connection.putheader("Transfer-Encoding", "chunked")
+        connection.endheaders()
+        connection.send(b"2\r\n{}\r\n0\r\n\r\n")
+        self.assertEqual(connection.getresponse().status, 400)
+        connection.close()
+        self.assertEqual(self.simctl_calls(), [])
+
+    def test_status_bar_clear_with_override_options_is_rejected(self):
+        # 「設定できたつもりで実際は全解除」になる指定を成功にしない
+        status, _ = self.post("/v1/status_bar", {"action": "clear", "batteryLevel": 100})
+        self.assertEqual(status, 400)
+        self.assertEqual(self.simctl_calls(), [])
 
     def test_get_on_unknown_path_is_rejected(self):
         request = urllib.request.Request(self.base_url + "/v1/relaunch", method="GET")

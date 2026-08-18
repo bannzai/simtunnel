@@ -47,6 +47,12 @@ ensure_repo() {
   return 0
 }
 
+# --slot は算術式 $((9100 + slot)) に展開されるため、非負の 10 進整数だけを受け付ける
+# （"1+1" のような式が別ポートに解決されるのを防ぐ）
+validate_slot() {
+  [[ "$1" =~ ^[0-9]+$ ]] || { echo "--slot は 0 以上の整数: $1" >&2; return 1; }
+}
+
 ts_bin() {
   if command -v tailscale >/dev/null 2>&1; then
     echo "tailscale"
@@ -300,6 +306,7 @@ cmd_status() {
       *) echo "不明なオプション: $1" >&2; return 1 ;;
     esac
   done
+  validate_slot "$slot" || return 1
   local ip
   ip=$(session_ip "$session")
   if [ -z "$ip" ]; then
@@ -320,6 +327,7 @@ cmd_screenshot() {
       *) out=$1; shift ;;
     esac
   done
+  validate_slot "$slot" || return 1
   [ -n "$out" ] || out="./tmp/simtunnel-${session}-$(date +%H%M%S).jpg"
   local ip
   ip=$(session_ip "$session")
@@ -360,6 +368,7 @@ cmd_record() {
       *) out=$1; shift ;;
     esac
   done
+  validate_slot "$slot" || return 1
   [[ "$duration" =~ ^[0-9]+$ ]] && [ "$duration" -ge 1 ] || {
     echo "--duration は 1 以上の整数（秒）: ${duration}" >&2
     return 1
@@ -368,8 +377,9 @@ cmd_record() {
     echo "--mp4 には ffmpeg が必要（brew install ffmpeg）" >&2
     return 1
   fi
-  # 既定名に slot を含める（複数 slot を同じ秒に並行録画すると同じファイルを奪い合うため）
-  [ -n "$out" ] || out="./tmp/simtunnel-${session}-slot${slot}-$(date +%H%M%S).mjpeg"
+  # 既定名は slot と PID まで含めて一意にする（同じ slot・同じ秒に 2 本走らせても、
+  # 後発の Python が先発の録画ファイルを wb で開いて切り詰めることがないように）
+  [ -n "$out" ] || out="./tmp/simtunnel-${session}-slot${slot}-$(date +%H%M%S)-$$.mjpeg"
   # --mp4 では ffmpeg の入力と出力を必ず別パスにする
   # （出力パスに .mp4 を渡された時、録画先と変換先が同じファイルになるため）
   local raw="$out" mp4_out=""
@@ -423,7 +433,11 @@ print(f"{frames} {time.time() - start:.1f}")
 EOF
 
   # curl の終了コードはパイプの中で失われるためファイルに落として後で判定する
-  local curl_exit_file="${raw}.curl-exit" stats_file="${raw}.stats" extract_ok=1
+  # 補助ファイルは出力先の隣に固定名で置かず一時ファイルにする（無関係な
+  # <録画先>.stats 等を上書き・削除しないため）
+  local curl_exit_file stats_file extract_ok=1
+  curl_exit_file=$(mktemp)
+  stats_file=$(mktemp)
   { curl -sN -m "$duration" "http://${ip}:$((9100 + slot))"; echo $? >"$curl_exit_file"; } \
     | OUT="$raw" python3 -c "$extract" >"$stats_file" || extract_ok=0
   local result curl_exit
@@ -443,8 +457,9 @@ EOF
   read -r frames elapsed <<<"$result"
 
   # 終了コード 0（サーバ側が正常にストリームを閉じた）でも、指定時間ぶん録れたとは限らない。
-  # WDA / Simulator の再起動で途中終了した録画を、確認対象が写っている証跡として扱わない
-  if awk -v e="$elapsed" -v d="$duration" 'BEGIN {exit !(e < d - 1)}'; then
+  # WDA / Simulator の再起動で途中終了した録画を、確認対象が写っている証跡として扱わない。
+  # 許容幅は指定時間の 10%（--duration 1 でも早期 EOF を検出できるよう、固定の 1 秒引きにしない）
+  if awk -v e="$elapsed" -v d="$duration" 'BEGIN {exit !(e < d * 0.9)}'; then
     echo "指定した ${duration} 秒に対して ${elapsed} 秒で MJPEG が終了した（WDA / Simulator の状態を確認）。途中までの録画: ${raw}" >&2
     return 1
   fi
@@ -474,6 +489,7 @@ cmd_mcp_config() {
       *) dir=$1; shift ;;
     esac
   done
+  validate_slot "$slot" || return 1
   command -v jq >/dev/null 2>&1 || { echo "jq が必要（brew install jq）" >&2; return 1; }
   [ -d "$dir" ] || { echo "ディレクトリが存在しない: $dir" >&2; return 1; }
 
@@ -519,6 +535,7 @@ cmd_preview() {
       *) echo "不明なオプション: $1" >&2; return 1 ;;
     esac
   done
+  validate_slot "$slot" || return 1
   local ip
   ip=$(session_ip "$session")
   [ -n "$ip" ] || { echo "simtunnel-${session} は tailnet に存在しない" >&2; return 1; }

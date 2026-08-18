@@ -365,6 +365,9 @@ class Agentd:
         if action not in ("override", "clear"):
             raise RequestError(400, "action は override か clear")
         if action == "clear":
+            # clear は全 override を解除する。同じリクエストに override のオプションがあると
+            # 「設定できたつもりで実際は解除された」状態になるため、矛盾した指定を成功にしない
+            self.reject_unknown_keys(body, ("slot", "action"))
             self.run_simctl(["status_bar", udid, "clear"])
             return {"action": "clear"}
         options = []
@@ -379,6 +382,11 @@ class Agentd:
             raise RequestError(400, f"override には {sorted(STATUS_BAR_OPTIONS)} のいずれかが必要")
         self.run_simctl(["status_bar", udid, "override", *options])
         return {"action": "override", "options": options}
+
+    def stop_all_recordings(self):
+        """実行中の録画をすべて止める（プロセスを残さないための後片付け）"""
+        for recording_id in list(self.recordings):
+            self.stop_recording(recording_id)
 
     def verbs(self):
         return {
@@ -438,17 +446,26 @@ def make_handler(agentd):
             self.respond(200, {"ok": True, **result})
 
         def read_body(self):
+            # chunked は実装しない。本文があるのに読まずに既定値で動詞を実行すると、
+            # 意図と違う slot / 引数で Simulator を操作してしまうため、受け取れない形式は拒否する
+            if self.headers.get("Transfer-Encoding"):
+                raise RequestError(400, "Transfer-Encoding は非対応（Content-Length を付ける）")
+            raw_length = self.headers.get("Content-Length")
+            if raw_length is None:
+                raise RequestError(411, "Content-Length が必要（引数なしの場合も {} を送る）")
             try:
-                length = int(self.headers.get("Content-Length", "0"))
-            except ValueError:
+                length = int(raw_length)
+            except ValueError as error:
+                raise RequestError(400, "Content-Length が不正") from error
+            if length < 0:
                 raise RequestError(400, "Content-Length が不正")
             if length > MAX_BODY_BYTES:
                 raise RequestError(413, f"body は {MAX_BODY_BYTES} bytes まで")
             raw = self.rfile.read(length) if length > 0 else b"{}"
             try:
                 body = json.loads(raw.decode("utf-8"))
-            except (UnicodeDecodeError, json.JSONDecodeError):
-                raise RequestError(400, "body が JSON として不正")
+            except (UnicodeDecodeError, json.JSONDecodeError) as error:
+                raise RequestError(400, "body が JSON として不正") from error
             if not isinstance(body, dict):
                 raise RequestError(400, "body は JSON オブジェクト")
             return body
@@ -458,7 +475,10 @@ def make_handler(agentd):
 
 def build_server(udids, work_dir, port):
     agentd = Agentd(udids, work_dir)
-    return ThreadingHTTPServer(("127.0.0.1", port), make_handler(agentd))
+    server = ThreadingHTTPServer(("127.0.0.1", port), make_handler(agentd))
+    # 実行中の録画を後片付けできるよう、セッション状態への参照を server から辿れるようにする
+    server.agentd = agentd
+    return server
 
 
 def main():

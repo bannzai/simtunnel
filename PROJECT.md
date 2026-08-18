@@ -77,7 +77,7 @@ Tailscale は無料の Personal プラン（デバイス 100 台）で成立す�
 1. **公開エンドポイントゼロ**: WDA / MJPEG は tailnet 内からしか到達できない
 2. **トリガーは `workflow_dispatch` のみ**: 起動できるのは write 権限者だけ。fork からの PR には Secrets / OIDC トークンの権限が渡らない
 3. **長期シークレットを持たない（OIDC / workload identity federation）**: Tailscale への認証は、GitHub が workflow に発行する短命の OIDC トークンで行う。subject がこのリポジトリを指す trust credential の Subject（形式は「Tailscale セットアップ手順」参照）に一致する workflow しか認証できず、盗まれて困る静的シークレットがそもそも存在しない（Secrets の `TS_OIDC_CLIENT_ID` / `TS_OIDC_AUDIENCE` は識別子であり秘密情報ではない）
-4. **Tailscale ACL で双方向を絞る**: 自分のデバイス → `tag:ci` の 8100/9100 のみ許可。`tag:ci` からの発信は全拒否。tailnet 内のローカルデバイスは SSH 等のサービスを listen している可能性がある前提で設計する（Tailscale が与えるのはネットワーク到達性だけでログイン権限ではないが、listen 中のサービスは攻撃面になる）。万一 runner が汚染されても tailnet 内の他デバイスへ発信できないことをこのルールで保証する
+4. **Tailscale ACL で双方向を絞る**: 自分のデバイス → `tag:ci` の 8100+i / 9100+i（WDA / MJPEG）・8200（agentd）・3200（serve-sim）のみ許可。`tag:ci` からの発信は全拒否。tailnet 内のローカルデバイスは SSH 等のサービスを listen している可能性がある前提で設計する（Tailscale が与えるのはネットワーク到達性だけでログイン権限ではないが、listen 中のサービスは攻撃面になる）。万一 runner が汚染されても tailnet 内の他デバイスへ発信できないことをこのルールで保証する
 
 ```jsonc
 // tailnet ポリシーの該当部分（grants 構文）
@@ -157,6 +157,11 @@ WDA では届かない領域（起動引数を要する状態の作り込み、�
 | `POST /v1/record/start` / `/v1/record/stop` | `io recordVideo` | 必要区間だけの runner 側録画 |
 | `POST /v1/privacy` | `privacy grant/revoke/reset`（service は列挙型） | 権限拒否・許可状態の作り込み |
 | `POST /v1/status_bar` | `status_bar override/clear` | スクリーンショットの整形 |
+
+`record/start` / `record/stop` の引数・応答:
+
+- `POST /v1/record/start`: body は `{"slot": <0 始まりの Simulator 番号。省略時 0>}`。応答 `{"recordingId": "<record/stop に渡す不透明な文字列>", "path": "<runner 上の出力先>", "maxSeconds": 600}`。同じ slot に実行中の録画があれば止めてから開始する（1 slot 1 本）。`recordingId` を受け取れないまま `maxSeconds` を超えると、サーバ側の watchdog が自動停止する
+- `POST /v1/record/stop`: body は `{"recordingId": "<record/start が返した値>"}`。応答 `{"path": "<runner 上の出力先>", "bytes": <ファイルサイズ>}`。runner 上の動画そのものは返さない（「録画ファイルを転送するエンドポイントは持たない」参照）
 
 **主体は増えず、能力だけが増える**: `:8200` に到達できるのは、既に `:8100` の無認証 WDA でシミュレータを完全操作できる tailnet 内の自分のデバイスだけ。新しく到達できる相手は生まれないため、「機能追加でこの前提を崩さないための判断基準」の範囲内に収まる。
 
@@ -284,13 +289,18 @@ SIMTUNNEL_REPO=<owner>/<repo> local/simtunnel up <session> --wait
 
 #### 起動引数を caller から渡す: `workflow_dispatch` の `type: choice`（固定選択肢）
 
-セッション開始時から効かせたい起動引数（アプリ起動前に読まれる設定など。セッション開始後なら agentd の `relaunch` で足りる）は caller workflow から渡す。**自由入力（`type: string`）は採らない**。
+`session.yml`（reusable workflow）は起動引数を受け取る input を持たず、`uses: .../session.yml` で呼ぶ job は他の `steps` を追加できない（reusable workflow を呼ぶ job はその 1 ステップだけで完結する）。そのため、起動引数が必要な場面は 2 つに分かれる。
 
-**推奨は `type: choice`（固定選択肢）方式**:
+**セッション起動後でよい場合（推奨・大半のケース）**: セッションが ready になってから、ローカル側で agentd の `relaunch` に渡す。起動引数を要する設定の多くはアプリ起動前に読まれるだけで、`relaunch`（`terminate` + `launch`）で読み直させれば足りる。この経路は `type: choice` を GitHub Actions input にする必要すらなく、preset 名 → 引数列の対応表をローカルのスクリプト・ドキュメントに置くだけで、agentd 側の文字種・個数・長さ制限（「simtunnel-agentd」参照）がそのまま安全な入力検証になる:
 
-- 選択肢に無い値は GitHub 側で dispatch が拒否されるため、自由文字列が workflow に流入する経路が構造的に無い
-- 選択肢の実値（実際に `simctl launch` へ渡す引数列）は workflow 内にハードコードし、input 値は選択肢のキーとしてだけ使う。`run:` への `${{ }}` 直接展開はしない
-- 1 ファイルに収まり、バリエーション追加は選択肢 1 行 + 対応する引数列の追記で済む
+```bash
+simtunnel up <session> --wait
+# preset 名 → 引数列の対応はローカル側で持つ（このリポジトリではなく呼び出し側の運用）
+curl -s -X POST http://simtunnel-<session>:8200/v1/relaunch \
+  -H 'Content-Type: application/json' -d '{"slot": 0, "args": ["-ONBOARDING_DONE", "1"]}'
+```
+
+**アプリの初回 launch から効かせる必要がある場合**: `build_project` input（runner 上での xcodebuild 直叩き）では起動引数を渡せないため、「ビルドに自由な step が必要なアプリ」節と同じ **build job 分割**で、caller 側の build job が起動引数を解決してから install / launch まで行い、`session.yml` へは `app_artifact`（既に起動済み）ではなく `serve_sim` 等の付随設定だけを渡す。この build job の `steps` は caller workflow 側の自由な job なので、`type: choice`（固定選択肢）の input を preset 名として受け、選択肢の実値（引数列）は workflow 内にハードコードして `run:` へ `${{ }}` 直接展開しない、という原則がそのまま使える:
 
 ```yaml
 on:
@@ -303,8 +313,12 @@ on:
         options: [none, onboarding-done, premium]
 
 jobs:
-  session:
+  build:
+    runs-on: macos-26
+    permissions:
+      contents: read
     steps:
+      - uses: actions/checkout@<commit SHA>
       # input 値は case のキーとしてだけ使い、引数列は workflow 内のハードコードから選ぶ
       - env:
           LAUNCH_PRESET: ${{ inputs.launch_preset }}
@@ -314,9 +328,23 @@ jobs:
             premium) ARGS=(-PREMIUM 1) ;;
             *) ARGS=() ;;
           esac
+          xcodebuild -project MyApp.xcodeproj -scheme MyApp -destination "generic/platform=iOS Simulator" -derivedDataPath build build
+          # このジョブ自身が simctl boot / install / launch "${ARGS[@]}" まで行う（session.yml は使わない）
+  session:
+    needs: build
+    permissions:
+      id-token: write
+      contents: read
+    uses: bannzai/simtunnel/.github/workflows/session.yml@<commit SHA>
+    with:
+      session: ${{ inputs.session }}
+      # build job が起動済みのため build_project / app_artifact は指定しない
+    secrets:
+      TS_OIDC_CLIENT_ID: ${{ secrets.TS_OIDC_CLIENT_ID }}
+      TS_OIDC_AUDIENCE: ${{ secrets.TS_OIDC_AUDIENCE }}
 ```
 
-代替として「バリエーションごとに caller workflow を分ける」（ファイルそのものが許可リストになる）方式も同等の安全性を持つ。バリエーションが少なく、それぞれ別の名前で dispatch したい場合はこちらでもよい。
+`type: choice` を使う原則（選択肢に無い値は dispatch 自体が拒否される・実値は workflow 内にハードコード）はどちらのケースでも共通。代替として「バリエーションごとに caller workflow を分ける」（ファイルそのものが許可リストになる）方式も同等の安全性を持つ。
 
 #### ビルドに自由な step が必要なアプリ（Flutter 等）: build job 分割 + artifact 渡し
 
