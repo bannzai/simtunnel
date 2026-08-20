@@ -142,7 +142,7 @@ simctl が必要な操作（アプリの launch / terminate、通知の合成等
 - **録画中は再エンコードしない**。multipart のヘッダだけ落として JPEG フレームをそのまま追記保存する（`.mjpeg` = JPEG の連結）。ローカルの負荷はディスク書き込みが支配的で軽微。mp4 が要る場合だけ、録画終了後に `--mp4`（ffmpeg）で変換する
 - **MJPEG は実質 1 クライアント占有**（Phase 4 の serve-sim 実測と同じ制約）。録画中は `screenshot` / `preview` を併用できない
 - 録画からフレームを切り出す: `ffmpeg -f mjpeg -i <出力.mjpeg> -fps_mode passthrough ./tmp/frame-%04d.jpg`
-- **指定時間ぶん録れなかった録画は失敗として返す**。MJPEG が途中で切れた場合（接続断でも、サーバ側の正常な EOF でも）、確認対象が写っていない証跡を成功として扱わないため
+- **指定時間ぶん録れなかった録画は失敗として返す**。MJPEG が途中で切れた場合（接続断でも、サーバ側の正常な EOF でも）も、接続が開いたままフレームが届かなくなった場合（最後のフレームの受信時刻が指定時間の 90% に届かない）も、確認対象が写っていない証跡を成功として扱わないため
 - **MJPEG は接続を短時間に繰り返すとストリームが早期に閉じる**（実測 2026-08-20: 連続実行で 12 秒指定に対し 2.5〜8.2 秒で EOF になり、間を空けると 11.0〜15.0 秒録れた）。`record` はこれを「指定時間の 90% 未満」で失敗として返すため、失敗したら少し間を空けて再実行する。runner 側の録画（agentd の `record/start`）が動いている間も画面の取り合いになるため、併用しない
 - **ストリームは実時間から数秒遅れて届く**（実測 2026-08-17: HOME を押してから録画に現れるまで約 9 秒。DERP relay のバッファリングによる）。確認したい操作の前に録画を始め、操作から十分あとまで録り続ける
 - 用途: 通知バナー発火の事後確認、E2E 操作の証跡、flaky の再現調査
@@ -176,14 +176,14 @@ WDA では届かない領域（起動引数を要する状態の作り込み、�
 - `simctl spawn` / `openurl` / `keychain` / `addmedia` など、**シミュレータ内での任意実行やホストのファイル参照につながる動詞は追加しない**
 - 呼び出しの監査ログは runner ローカル（`$RUNNER_TEMP/agentd-audit.log`）にだけ記録する。HTTP サーバの既定のアクセスログも stderr ではなくこのファイルへ流し、public repo の run ログ・ステップサマリに値を出さない
 - **録画ファイルを転送するエンドポイントは持たない**。`record/stop` は runner 上のパスとサイズを返すだけにする。DERP relay 経由（実測 約 60KB/s）では動画の取り出しが現実的な時間で終わらず、ローカル側の録画は `simtunnel record` で足りるため
-- **runner 側の録画は 1 slot につき 1 本・最長 10 分**。`record/start` は同じ slot の実行中の録画を止めてから始め、止め忘れた録画もサーバ側の watchdog が打ち切る。応答が届かず `recordingId` を受け取れなかったクライアントは録画を止められず、放っておくとジョブが終わるまで書き続けて runner のディスクを圧迫するため
+- **runner 側の録画は 1 slot につき 1 本・最長 10 分・停止済みの保持は直近 5 本**。`record/start` は同じ slot の実行中の録画を止めてから始め、止め忘れた録画もサーバ側の watchdog が打ち切る。応答が届かず `recordingId` を受け取れなかったクライアントは録画を止められず、放っておくとジョブが終わるまで書き続けて runner のディスクを圧迫するため。停止済みの録画も 5 本を超えた分は古いものから動画とログを消す（1 本 10 分の上限だけでは、録画を繰り返すと本数の累積で runner のディスクを使い切る。転送エンドポイントを持たない以上、残す意味があるのは同じセッション中に確認できる直近の数本だけ）
 
 ハマりどころ:
 
 - **WDA / maestro のドライバ（`*.xctrunner`）も User アプリとして `listapps` に並ぶ**（実測 2026-08-17）。これを操作できると `relaunch` でセッション自体を殺せてしまうため、許可リストから除外している
 - **`push` が 200 を返しても、対象アプリが通知許可を得ていなければバナーは表示されない**（実測 2026-08-17。simtunnel のサンプルアプリは通知許可を要求しないため、`push` は成功するが画面には出ない）。バナーの発火を確認したいアプリ側では、通知許可を得た状態を作ってから `push` する
 - **`simctl io recordVideo` をきれいに終わらせられるのは SIGINT だけ**（実測 2026-08-17）。SIGTERM でも SIGKILL でも、その runner のホスト録画が `Resource busy`（`Host recording is already in progress`）のまま残り、以降の `record/start` が全て失敗する。停止は SIGINT を間を置いて 4 回まで送り、SIGKILL は放置するとディスクを食い潰す場合の最後の手段にする。この状態になったセッションでは runner 側の録画を諦め、ローカル側の `simtunnel record` を使う
-- **`record/start` の直後は simctl が SIGINT を取りこぼす**（実測 2026-08-17）。`record/start` は出力ファイルが書かれる（= 録画が実際に始まる）まで待ってから応答を返すことで、直後の `record/stop` でも SIGINT が効くようにしている
+- **`record/start` の直後は simctl が SIGINT を取りこぼす**（実測 2026-08-17）。`record/start` は simctl がログに `Recording started` を出す（= 録画が実際に始まる。出力ファイルは停止時にまとめて書かれるため開始判定には使えない）まで待ってから応答を返すことで、直後の `record/stop` でも SIGINT が効くようにしている
 
 呼び出しはセッション名で直接 curl する（専用の CLI サブコマンドは持たない）:
 
@@ -301,7 +301,7 @@ curl -s -X POST http://simtunnel-<session>:8200/v1/relaunch \
   -H 'Content-Type: application/json' -d '{"slot": 0, "args": ["-ONBOARDING_DONE", "1"]}'
 ```
 
-**アプリの初回 launch から効かせる必要がある場合**: `session.yml` の `launch_args` input に渡す。runner 上の install / launch は `session.yml` と同じ job で行われるため、Simulator の状態を跨がずに起動引数が効く。値は `[A-Za-z0-9_=-]` のみを許可する検証を reusable workflow 側でも行う（caller が `type: choice` で絞っていることに依存せず、単体で成立させるため）。
+**アプリの初回 launch から効かせる必要がある場合**: `session.yml` の `launch_args` input に渡す。runner 上の install / launch は `session.yml` と同じ job で行われるため、Simulator の状態を跨がずに起動引数が効く。値は agentd の `relaunch` と同じ制限（文字種 `[A-Za-z0-9_=-]`・16 個まで・1 個 64 文字まで）の検証を reusable workflow 側でも行い、拒否した値は public な run ログに出さない（caller が `type: choice` で絞っていることに依存せず、単体で成立させるため）。このリポジトリ自身の caller（`simulator-session.yml`）も `launch_preset`（`type: choice`）から引数列を引く形にしてあり、サンプルアプリは起動引数を読まないが、この経路を実 run で確認する用途に使える。
 
 caller は `type: choice`（固定選択肢）の input を preset 名として受け、選択肢の実値（引数列）は workflow 内にハードコードして `run:` へ `${{ }}` 直接展開しない:
 
@@ -712,7 +712,7 @@ env = { SIMTUNNEL_WDA_URL = "http://simtunnel-<session>:8100" }
 - [x] mobile-mcp 互換ツール（完了: 2026-07-06）: `mcp__mobile__*` ツール名前提の既存 skill を simtunnel 経由で動かすための互換レイヤーを simtunnel-mcp に追加。詳細は「MCP の登録 > mobile-mcp 互換ツール」
 - [x] simtunnel-agentd（完了: 2026-08-17）: runner 上の HTTP 受け口（:8200 / tailnet 内限定）で、許可した simctl の動詞だけを遠隔実行する（設計:「simtunnel-agentd」）。当初想定していた「.app を zip で転送 → install → launch」は per-repo 展開でアプリを各 repo の runner がビルドするようになったため実装せず、WDA では届かない領域（起動引数・通知・権限・ステータスバー）に絞った
   - 検証（実 run / iPhone 17 / simulators=1）: 許可した 5 動詞がすべて 200（`status_bar override` は `9:41` / 電池 100% / 4 本アンテナがスクリーンショットに反映、`relaunch` はアプリが前面に戻ることを確認、`record/stop` は runner 上のパスとサイズを返した）。許可外・不正入力は `spawn` / `openurl` が 404、`udid` 指定・範囲外 slot・不正な起動引数・未知のキー・`aps` の無い payload・列挙外の privacy service・範囲外の status_bar 値が 400、セッション外の bundleId が 403
-  - ローカル検証: `python3 runner/test/test-agentd.py`（`xcrun` をスタブに差し替えて 18 ケース）
+  - ローカル検証: `python3 runner/test/test-agentd.py`（`xcrun` をスタブに差し替えて実行）
 - [x] クライアント側録画 `simtunnel record`（完了: 2026-08-17）: MJPEG (:9100) をローカルに録画する（設計:「画面の録画」）
   - 検証（実 run / 2 本）: 25 秒の録画で 229 フレーム（9.2 fps / 13.2MB）と `--mp4` の ffmpeg 変換を確認。別の約 19 秒の録画（81 フレーム / 4.2 fps）で、録画中に起こした画面遷移（アプリ → ホーム画面）が 64 フレーム目として特定できることを確認
 - [x] 1 runner 複数 Simulator（完了: 2026-07-07）: `simulators` input で台数指定。2 台目以降はデバイスの clone を boot し、i 台目の WDA に per-sim の xctestrun コピーで `USE_PORT=8100+i` / `MJPEG_SERVER_PORT=9100+i` を注入する。CLI / mcp-config は `--slot` で台を指定。simulators=2 の実 run で両ポート HTTP 200・サンプルアプリ両台 install・slot 1 のみ tap して独立性をスクリーンショットで確認。ハマり: xctestrun のコピーは `__TESTROOT__` 相対で成果物を参照するため、元と同じディレクトリに置く必要がある。3 台以上のメモリ成立性は未検証
