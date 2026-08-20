@@ -40,11 +40,13 @@ RECORD_STOP_SIGNALS = (
 RECORD_READY_TIMEOUT_SECONDS = 20
 RECORD_READY_LOG_LINE = "Recording started"
 
-LAUNCH_ARG_PATTERN = re.compile(r"^[A-Za-z0-9_=-]+$")
+# 許可リストは fullmatch で使う（Python の $ は末尾改行の直前にも一致するため、
+# "-UITEST\n" のような値が ^...$ の match をすり抜ける）
+LAUNCH_ARG_PATTERN = re.compile(r"[A-Za-z0-9_=-]+")
 MAX_LAUNCH_ARGS = 16
 MAX_LAUNCH_ARG_LENGTH = 64
 
-BUNDLE_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9.-]{0,127}$")
+BUNDLE_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9.-]{0,127}")
 
 # simctl privacy が受け付ける service（列挙型にして自由入力を排除する）
 PRIVACY_SERVICES = (
@@ -53,10 +55,10 @@ PRIVACY_SERVICES = (
 )
 PRIVACY_ACTIONS = ("grant", "revoke", "reset")
 
-STATUS_BAR_TIME_PATTERN = re.compile(r"^([01]?[0-9]|2[0-3]):[0-5][0-9]$")
+STATUS_BAR_TIME_PATTERN = re.compile(r"([01]?[0-9]|2[0-3]):[0-5][0-9]")
 # status_bar override のオプション名 -> 値の検証器
 STATUS_BAR_OPTIONS = {
-    "time": lambda v: isinstance(v, str) and bool(STATUS_BAR_TIME_PATTERN.match(v)),
+    "time": lambda v: isinstance(v, str) and bool(STATUS_BAR_TIME_PATTERN.fullmatch(v)),
     "dataNetwork": lambda v: v in ("hide", "wifi", "3g", "4g", "lte", "lte-a", "lte+", "5g", "5g+", "5g-uwb", "5g-uc"),
     "wifiMode": lambda v: v in ("searching", "failed", "active"),
     "wifiBars": lambda v: isinstance(v, int) and not isinstance(v, bool) and 0 <= v <= 3,
@@ -142,7 +144,7 @@ class Agentd:
             if len(allowed) != 1:
                 raise RequestError(400, f"bundleId を指定する（install 済み: {sorted(allowed)}）")
             return next(iter(allowed))
-        if not isinstance(requested, str) or not BUNDLE_ID_PATTERN.match(requested):
+        if not isinstance(requested, str) or not BUNDLE_ID_PATTERN.fullmatch(requested):
             raise RequestError(400, "bundleId の形式が不正")
         if requested not in allowed:
             raise RequestError(403, "このセッションで install していない bundleId は操作できない")
@@ -162,7 +164,7 @@ class Agentd:
         if len(args) > MAX_LAUNCH_ARGS:
             raise RequestError(400, f"args は {MAX_LAUNCH_ARGS} 個まで")
         for arg in args:
-            if not isinstance(arg, str) or len(arg) > MAX_LAUNCH_ARG_LENGTH or not LAUNCH_ARG_PATTERN.match(arg):
+            if not isinstance(arg, str) or len(arg) > MAX_LAUNCH_ARG_LENGTH or not LAUNCH_ARG_PATTERN.fullmatch(arg):
                 raise RequestError(400, f"args は {LAUNCH_ARG_PATTERN.pattern} に一致する {MAX_LAUNCH_ARG_LENGTH} 文字以内の文字列のみ")
         return args
 

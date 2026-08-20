@@ -289,7 +289,7 @@ SIMTUNNEL_REPO=<owner>/<repo> local/simtunnel up <session> --wait
 
 #### 起動引数を caller から渡す: `workflow_dispatch` の `type: choice`（固定選択肢）
 
-`session.yml`（reusable workflow）は起動引数を受け取る input を持たず、`uses: .../session.yml` で呼ぶ job は他の `steps` を追加できない（reusable workflow を呼ぶ job はその 1 ステップだけで完結する）。そのため、起動引数が必要な場面は 2 つに分かれる。
+起動引数を渡す経路は 2 つある。**どちらでも自由入力（`type: string`）は採らない**。`uses: .../session.yml` で呼ぶ job には `steps` を追加できない（reusable workflow を呼ぶ job はその呼び出しだけで完結する）ため、caller 側で引数列を組み立てる場合は別 job の output を経由する。
 
 **セッション起動後でよい場合（推奨・大半のケース）**: セッションが ready になってから、ローカル側で agentd の `relaunch` に渡す。起動引数を要する設定の多くはアプリ起動前に読まれるだけで、`relaunch`（`terminate` + `launch`）で読み直させれば足りる。この経路は `type: choice` を GitHub Actions input にする必要すらなく、preset 名 → 引数列の対応表をローカルのスクリプト・ドキュメントに置くだけで、agentd 側の文字種・個数・長さ制限（「simtunnel-agentd」参照）がそのまま安全な入力検証になる:
 
@@ -300,7 +300,9 @@ curl -s -X POST http://simtunnel-<session>:8200/v1/relaunch \
   -H 'Content-Type: application/json' -d '{"slot": 0, "args": ["-ONBOARDING_DONE", "1"]}'
 ```
 
-**アプリの初回 launch から効かせる必要がある場合**: `build_project` input（runner 上での xcodebuild 直叩き）では起動引数を渡せないため、「ビルドに自由な step が必要なアプリ」節と同じ **build job 分割**で、caller 側の build job が起動引数を解決してから install / launch まで行い、`session.yml` へは `app_artifact`（既に起動済み）ではなく `serve_sim` 等の付随設定だけを渡す。この build job の `steps` は caller workflow 側の自由な job なので、`type: choice`（固定選択肢）の input を preset 名として受け、選択肢の実値（引数列）は workflow 内にハードコードして `run:` へ `${{ }}` 直接展開しない、という原則がそのまま使える:
+**アプリの初回 launch から効かせる必要がある場合**: `session.yml` の `launch_args` input に渡す。runner 上の install / launch は `session.yml` と同じ job で行われるため、Simulator の状態を跨がずに起動引数が効く。値は `[A-Za-z0-9_=-]` のみを許可する検証を reusable workflow 側でも行う（caller が `type: choice` で絞っていることに依存せず、単体で成立させるため）。
+
+caller は `type: choice`（固定選択肢）の input を preset 名として受け、選択肢の実値（引数列）は workflow 内にハードコードして `run:` へ `${{ }}` 直接展開しない:
 
 ```yaml
 on:
@@ -313,32 +315,33 @@ on:
         options: [none, onboarding-done, premium]
 
 jobs:
-  build:
-    runs-on: macos-26
-    permissions:
-      contents: read
+  # input 値は選択肢のキーとしてだけ使い、引数列は workflow 内のハードコードから選ぶ
+  resolve-args:
+    runs-on: ubuntu-latest
+    outputs:
+      launch_args: ${{ steps.preset.outputs.launch_args }}
     steps:
-      - uses: actions/checkout@<commit SHA>
-      # input 値は case のキーとしてだけ使い、引数列は workflow 内のハードコードから選ぶ
-      - env:
+      - id: preset
+        env:
           LAUNCH_PRESET: ${{ inputs.launch_preset }}
         run: |
           case "$LAUNCH_PRESET" in
-            onboarding-done) ARGS=(-ONBOARDING_DONE 1) ;;
-            premium) ARGS=(-PREMIUM 1) ;;
-            *) ARGS=() ;;
+            onboarding-done) ARGS="-ONBOARDING_DONE 1" ;;
+            premium) ARGS="-PREMIUM 1" ;;
+            *) ARGS="" ;;
           esac
-          xcodebuild -project MyApp.xcodeproj -scheme MyApp -destination "generic/platform=iOS Simulator" -derivedDataPath build build
-          # このジョブ自身が simctl boot / install / launch "${ARGS[@]}" まで行う（session.yml は使わない）
+          echo "launch_args=$ARGS" >> "$GITHUB_OUTPUT"
   session:
-    needs: build
+    needs: resolve-args
     permissions:
       id-token: write
       contents: read
     uses: bannzai/simtunnel/.github/workflows/session.yml@<commit SHA>
     with:
       session: ${{ inputs.session }}
-      # build job が起動済みのため build_project / app_artifact は指定しない
+      build_project: MyApp.xcodeproj
+      build_scheme: MyApp
+      launch_args: ${{ needs.resolve-args.outputs.launch_args }}
     secrets:
       TS_OIDC_CLIENT_ID: ${{ secrets.TS_OIDC_CLIENT_ID }}
       TS_OIDC_AUDIENCE: ${{ secrets.TS_OIDC_AUDIENCE }}

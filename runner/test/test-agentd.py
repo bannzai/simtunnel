@@ -259,6 +259,14 @@ class AgentdTestCase(unittest.TestCase):
             self.assertEqual(status, 400, slot)
         self.assertEqual(self.simctl_calls(), [])
 
+    def test_trailing_newline_in_validated_values_is_rejected(self):
+        # 末尾改行を許すと、想定と違う argv / 表示状態のまま 200 を返してしまう
+        status, _ = self.post("/v1/status_bar", {"time": "09:41\n"})
+        self.assertEqual(status, 400)
+        status, _ = self.post("/v1/relaunch", {"bundleId": "com.example.sample\n"})
+        self.assertEqual(status, 400)
+        self.assertEqual(self.simctl_calls(), [])
+
     def test_bundle_id_outside_session_is_rejected(self):
         status, _ = self.post("/v1/relaunch", {"bundleId": "com.apple.Maps"})
         self.assertEqual(status, 403)
@@ -275,6 +283,8 @@ class AgentdTestCase(unittest.TestCase):
             ["; rm -rf /"],
             ["--path /etc/passwd"],
             ["$(whoami)"],
+            ["-UITEST\n"],  # Python の $ は末尾改行の直前にも一致するため fullmatch で弾く
+            ["\n"],
             ["a" * (agentd_module.MAX_LAUNCH_ARG_LENGTH + 1)],
             ["ok"] * (agentd_module.MAX_LAUNCH_ARGS + 1),
             "not-a-list",

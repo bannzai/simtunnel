@@ -37,9 +37,12 @@ find "$APP_PATH" -name Info.plist -print0 | while IFS= read -r -d '' plist; do
   if [ -f "${dir}/${exe}" ]; then chmod +x "${dir}/${exe}"; fi
 done
 
+# 起動引数は workflow の「入力を検証」step で文字種を絞ってある。
+# 単語分割させるため意図的にクオートしない
+# shellcheck disable=SC2086
 for u in ${SIMULATOR_UDIDS:-$UDID}; do
   xcrun simctl install "$u" "$APP_PATH"
   echo "installed: ${APP_PATH} (${BUNDLE_ID}) -> ${u}"
-  xcrun simctl launch "$u" "$BUNDLE_ID"
-  echo "launched: ${BUNDLE_ID} -> ${u}"
+  xcrun simctl launch "$u" "$BUNDLE_ID" ${LAUNCH_ARGS:-}
+  echo "launched: ${BUNDLE_ID}${LAUNCH_ARGS:+ (args: ${LAUNCH_ARGS})} -> ${u}"
 done

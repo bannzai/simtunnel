@@ -34,6 +34,10 @@ on:
         description: "install 後に launch する bundle id（省略時は launch しない）"
         required: false
         default: ""
+      launch_args:
+        description: "アプリの初回 launch に渡す起動引数（空白区切り。文字種は [A-Za-z0-9_=-] のみ）"
+        required: false
+        default: ""
       sample_app:
         description: "リポジトリ内のサンプルアプリ (iOSProject) をビルドして launch する"
         required: false
@@ -59,6 +63,7 @@ jobs:
       bundle_id: ${{ inputs.bundle_id }}
       build_project: ${{ inputs.sample_app == 'true' && 'iOSProject/iOSProject.xcodeproj' || '' }}
       build_scheme: ${{ inputs.sample_app == 'true' && 'iOSProject' || '' }}
+      launch_args: ${{ inputs.launch_args }}
       serve_sim: ${{ inputs.serve_sim }}
     secrets:
       TS_OIDC_CLIENT_ID: ${{ secrets.TS_OIDC_CLIENT_ID }}

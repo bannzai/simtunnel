@@ -55,6 +55,11 @@ on:
         type: string
         required: false
         default: Debug
+      launch_args:
+        description: "アプリの初回 launch に渡す起動引数（空白区切り。文字種は [A-Za-z0-9_=-] のみ）。caller は type: choice の固定選択肢から選んだ値だけを渡す（参照: PROJECT.md「起動引数を caller から渡す」）"
+        type: string
+        required: false
+        default: ""
       serve_sim:
         description: "serve-sim を起動する（全 Simulator をブラウザから見る・操作する preview UI :3200）"
         type: string
@@ -93,6 +98,7 @@ jobs:
           BUILD_PROJECT: ${{ inputs.build_project }}
           BUILD_SCHEME: ${{ inputs.build_scheme }}
           SIMULATORS: ${{ inputs.simulators }}
+          LAUNCH_ARGS: ${{ inputs.launch_args }}
           JOB_WORKFLOW_SHA: ${{ job.workflow_sha }}
         run: |
           [[ "$SESSION" =~ ^[a-z0-9-]+$ ]] || {
@@ -107,6 +113,14 @@ jobs:
             echo "build_project 指定時は build_scheme も必須" >&2
             exit 1
           fi
+          # 起動引数は simctl launch に argv として渡るため、agentd と同じ許可リストで絞る
+          # （caller 側で type: choice の固定選択肢に限っていても、reusable workflow 単体で成立させる）
+          for arg in $LAUNCH_ARGS; do
+            [[ "$arg" =~ ^[A-Za-z0-9_=-]+$ ]] || {
+              echo "launch_args に使えるのは [A-Za-z0-9_=-] のみ: $arg" >&2
+              exit 1
+            }
+          done
           # 空だと simtunnel の checkout がデフォルトブランチに落ちて workflow と scripts の版がずれる
           [ -n "$JOB_WORKFLOW_SHA" ] || {
             echo "job.workflow_sha が空。runner スクリプトの版を固定できないため中断" >&2
@@ -152,6 +166,7 @@ jobs:
         env:
           APP_ZIP_URL: ${{ inputs.app_zip_url }}
           BUNDLE_ID: ${{ inputs.bundle_id }}
+          LAUNCH_ARGS: ${{ inputs.launch_args }}
         run: ./simtunnel/runner/install-app.sh
 
       # caller の build job がアップロードした .app（同一 run の artifact）を install する経路。
@@ -169,6 +184,7 @@ jobs:
         timeout-minutes: 10
         env:
           APP_DIR: artifact-app
+          LAUNCH_ARGS: ${{ inputs.launch_args }}
         run: ./simtunnel/runner/install-artifact-app.sh
 
       - name: アプリをビルドして install / launch
@@ -178,6 +194,7 @@ jobs:
           BUILD_PROJECT: ${{ inputs.build_project }}
           BUILD_SCHEME: ${{ inputs.build_scheme }}
           BUILD_CONFIGURATION: ${{ inputs.build_configuration }}
+          LAUNCH_ARGS: ${{ inputs.launch_args }}
         run: ./simtunnel/runner/build-app.sh
 
       # caller リポジトリに .maestro/flows/simtunnel/setup.yml があれば実行する（存在チェックはスクリプト内。無ければスキップ）。

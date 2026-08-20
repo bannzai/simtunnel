@@ -10,7 +10,9 @@ WORK="${RUNNER_TEMP:-$(pwd)/tmp}"
 LOG="${WORK}/agentd.log"
 mkdir -p "$WORK"
 
-agentd_alive() { curl -s -m 2 "http://127.0.0.1:${PORT}/status" >/dev/null; }
+# --fail: HTTP 404 / 500 でも curl は exit 0 になるため、別プロセスがそのポートを
+# 握っている状態を「起動できた」と誤判定しないよう、成功ステータスを必須にする
+agentd_alive() { curl -fsS -m 2 "http://127.0.0.1:${PORT}/status" >/dev/null 2>&1; }
 
 if agentd_alive; then
   echo "agentd already running on :${PORT}"
