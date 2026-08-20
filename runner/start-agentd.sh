@@ -10,9 +10,10 @@ WORK="${RUNNER_TEMP:-$(pwd)/tmp}"
 LOG="${WORK}/agentd.log"
 mkdir -p "$WORK"
 
-# --fail: HTTP 404 / 500 でも curl は exit 0 になるため、別プロセスがそのポートを
-# 握っている状態を「起動できた」と誤判定しないよう、成功ステータスを必須にする
-agentd_alive() { curl -fsS -m 2 "http://127.0.0.1:${PORT}/status" >/dev/null 2>&1; }
+# --fail: HTTP 404 / 500 でも curl は exit 0 になるため成功ステータスを必須にし、さらに応答に
+# agentd の /status だけが返す "verbs" があることを見る。別プロセスがそのポートを握って 2xx を
+# 返している状態を「起動できた」と誤判定すると、後続の bridge がそのプロセスを tailnet へ公開してしまう
+agentd_alive() { curl -fsS -m 2 "http://127.0.0.1:${PORT}/status" 2>/dev/null | grep -q '"verbs"'; }
 
 if agentd_alive; then
   echo "agentd already running on :${PORT}"

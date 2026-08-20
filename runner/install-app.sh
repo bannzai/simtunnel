@@ -27,10 +27,10 @@ for u in $UDIDS; do
   xcrun simctl install "$u" "$APP_PATH"
   echo "installed: ${APP_PATH} -> ${u}"
   if [ -n "$BUNDLE_ID" ]; then
-    # 起動引数は workflow の「入力を検証」step で文字種を絞ってある。
+    # 起動引数は workflow の「入力を検証」step で文字種・個数・長さを絞ってある。値は public な run ログに出さない。
     # 単語分割させるため意図的にクオートしない
     # shellcheck disable=SC2086
     xcrun simctl launch "$u" "$BUNDLE_ID" ${LAUNCH_ARGS:-}
-    echo "launched: ${BUNDLE_ID}${LAUNCH_ARGS:+ (args: ${LAUNCH_ARGS})} -> ${u}"
+    echo "launched: ${BUNDLE_ID}${LAUNCH_ARGS:+ (with launch args)} -> ${u}"
   fi
 done

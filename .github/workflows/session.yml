@@ -113,14 +113,24 @@ jobs:
             echo "build_project 指定時は build_scheme も必須" >&2
             exit 1
           fi
-          # 起動引数は simctl launch に argv として渡るため、agentd と同じ許可リストで絞る
-          # （caller 側で type: choice の固定選択肢に限っていても、reusable workflow 単体で成立させる）
-          for arg in $LAUNCH_ARGS; do
-            [[ "$arg" =~ ^[A-Za-z0-9_=-]+$ ]] || {
-              echo "launch_args に使えるのは [A-Za-z0-9_=-] のみ: $arg" >&2
+          # 起動引数は simctl launch に argv として渡るため、agentd と同じ制限（文字種・個数・長さ）で絞る
+          # （caller 側で type: choice の固定選択肢に限っていても、reusable workflow 単体で成立させる）。
+          # 単語分割の前に glob を無効にし、"*" 等がカレントディレクトリのファイル名に置き換わってから
+          # 検証されることを防ぐ。拒否した値は public な run ログに出さない
+          set -f
+          read -ra LAUNCH_ARG_LIST <<<"$LAUNCH_ARGS"
+          [ "${#LAUNCH_ARG_LIST[@]}" -le 16 ] || {
+            echo "launch_args は 16 個まで（${#LAUNCH_ARG_LIST[@]} 個）" >&2
+            exit 1
+          }
+          for i in "${!LAUNCH_ARG_LIST[@]}"; do
+            arg=${LAUNCH_ARG_LIST[$i]}
+            [[ "$arg" =~ ^[A-Za-z0-9_=-]+$ ]] && [ "${#arg}" -le 64 ] || {
+              echo "launch_args の $((i + 1)) 個目が不正（使えるのは [A-Za-z0-9_=-] のみ・1 個 64 文字まで）" >&2
               exit 1
             }
           done
+          set +f
           # 空だと simtunnel の checkout がデフォルトブランチに落ちて workflow と scripts の版がずれる
           [ -n "$JOB_WORKFLOW_SHA" ] || {
             echo "job.workflow_sha が空。runner スクリプトの版を固定できないため中断" >&2

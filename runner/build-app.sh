@@ -33,12 +33,12 @@ APP_PATH=$(find "${DD}/Build/Products/${CONFIGURATION}-iphonesimulator" -maxdept
 [ -n "$APP_PATH" ] || { echo "ビルド後に .app が見つからない" >&2; exit 1; }
 BUNDLE_ID=$(/usr/libexec/PlistBuddy -c 'Print CFBundleIdentifier' "${APP_PATH}/Info.plist")
 
-# 起動引数は workflow の「入力を検証」step で文字種を絞ってある。
+# 起動引数は workflow の「入力を検証」step で文字種・個数・長さを絞ってある。値は public な run ログに出さない。
 # 単語分割させるため意図的にクオートしない
 # shellcheck disable=SC2086
 for u in ${SIMULATOR_UDIDS:-$UDID}; do
   xcrun simctl install "$u" "$APP_PATH"
   echo "installed: ${APP_PATH} (${BUNDLE_ID}) -> ${u}"
   xcrun simctl launch "$u" "$BUNDLE_ID" ${LAUNCH_ARGS:-}
-  echo "launched: ${BUNDLE_ID}${LAUNCH_ARGS:+ (args: ${LAUNCH_ARGS})} -> ${u}"
+  echo "launched: ${BUNDLE_ID}${LAUNCH_ARGS:+ (with launch args)} -> ${u}"
 done
