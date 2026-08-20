@@ -33,6 +33,10 @@ MAX_RECORDING_SECONDS = 600
 RECORD_STOP_SIGNALS = (
     (signal.SIGINT, 3), (signal.SIGINT, 5), (signal.SIGINT, 10), (signal.SIGINT, 15), (signal.SIGKILL, 5),
 )
+# 停止済みの録画を runner 上に残す本数。録画を転送するエンドポイントは持たないため、残す意味があるのは
+# 同じセッション中に runner へ入って確認できる直近の数本だけで、それ以上は 10 分 × 録画本数で
+# ディスクを食い潰す方が問題になる（1 本の上限は MAX_RECORDING_SECONDS、総量はこの本数で抑える）
+MAX_FINISHED_RECORDINGS = 5
 # 録画が実際に始まった（= simctl が SIGINT を受け付ける状態になった）ことを確認するまでの上限。
 # Popen 直後は simctl がまだハンドラを張っておらず SIGINT を取りこぼす（実測 2026-08-17）ため、
 # simctl が下記の行を出すまで待ってから start の応答を返す。
@@ -73,6 +77,11 @@ MAX_PAYLOAD_DEPTH = 6
 MAX_PAYLOAD_KEYS = 64
 
 
+def reject_json_constant(name):
+    """json.loads の parse_constant。NaN / Infinity / -Infinity を受け付けず ValueError にする"""
+    raise ValueError(f"JSON の仕様外の定数: {name}")
+
+
 class RequestError(Exception):
     """クライアント起因のエラー。HTTP ステータスと一緒に返す"""
 
@@ -94,6 +103,8 @@ class Agentd:
         self.audit_path = os.path.join(self.work_dir, "agentd-audit.log")
         # recordingId -> 実行中の録画。watchdog スレッドからも触るためロックで守る
         self.recordings = {}
+        # 停止済みの録画の (動画パス, ログパス) を古い順に持ち、MAX_FINISHED_RECORDINGS を超えた分を消す
+        self.finished_recordings = []
         self.recordings_lock = threading.Lock()
         # slot ごとの録画の停止・開始を直列化する（ThreadingHTTPServer はリクエストを並行処理するため、
         # 停止待ちの最中に start が割り込むと simctl が Host recording is already in progress で失敗する）。
@@ -266,7 +277,21 @@ class Agentd:
             error = f"録画ファイルが空（simctl 終了コード {process.returncode}）: {self.tail_log(recording['log_path'])}"
         else:
             error = None
+        self.retain_finished_recording(recording["path"], recording["log_path"])
         return recording["path"], size, error
+
+    def retain_finished_recording(self, path, log_path):
+        """停止済みの録画を保持リストに加え、上限を超えた古い録画を runner から消す"""
+        with self.recordings_lock:
+            self.finished_recordings.append((path, log_path))
+            expired = self.finished_recordings[:-MAX_FINISHED_RECORDINGS]
+            del self.finished_recordings[:-MAX_FINISHED_RECORDINGS]
+        for expired_path, expired_log_path in expired:
+            for file_path in (expired_path, expired_log_path):
+                try:
+                    os.remove(file_path)
+                except FileNotFoundError:
+                    pass
 
     @staticmethod
     def terminate_recording(process):
@@ -299,9 +324,10 @@ class Agentd:
         with self.slot_locks[slot]:
             # 1 slot につき 1 本に限る。recordingId を受け取れなかったクライアントが止められない
             # 録画を残しても、次の start で回収できる
-            for running_id, recording in list(self.recordings.items()):
-                if recording["slot"] == slot:
-                    self.stop_recording(running_id)
+            with self.recordings_lock:
+                running_ids = [running_id for running_id, recording in self.recordings.items() if recording["slot"] == slot]
+            for running_id in running_ids:
+                self.stop_recording(running_id)
 
             with open(log_path, "wb") as log:
                 process = subprocess.Popen(
@@ -316,8 +342,8 @@ class Agentd:
                 }
             watchdog.start()
 
-            # Popen はコマンドの起動に成功しただけで返る。録画が実際に始まる（出力ファイルが書かれる）
-            # までロック内で待ち、simctl の失敗を成功として返さない。ここで待つことは
+            # Popen はコマンドの起動に成功しただけで返る。録画が実際に始まる（simctl が
+            # RECORD_READY_LOG_LINE を出す）までロック内で待ち、simctl の失敗を成功として返さない。ここで待つことは
             # 「SIGINT を受け付ける状態になってから応答する」ことでもあり、直後の stop の取りこぼしも防ぐ
             deadline = time.monotonic() + RECORD_READY_TIMEOUT_SECONDS
             while True:
@@ -387,7 +413,9 @@ class Agentd:
 
     def stop_all_recordings(self):
         """実行中の録画をすべて止める（プロセスを残さないための後片付け）"""
-        for recording_id in list(self.recordings):
+        with self.recordings_lock:
+            recording_ids = list(self.recordings)
+        for recording_id in recording_ids:
             self.stop_recording(recording_id)
 
     def verbs(self):
@@ -465,8 +493,10 @@ def make_handler(agentd):
                 raise RequestError(413, f"body は {MAX_BODY_BYTES} bytes まで")
             raw = self.rfile.read(length) if length > 0 else b"{}"
             try:
-                body = json.loads(raw.decode("utf-8"))
-            except (UnicodeDecodeError, json.JSONDecodeError) as error:
+                # Python の json は NaN / Infinity を既定で受け付けるが JSON の仕様外で、
+                # そのまま書き出すと simctl に渡す payload も不正な JSON になるため拒否する
+                body = json.loads(raw.decode("utf-8"), parse_constant=reject_json_constant)
+            except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
                 raise RequestError(400, "body が JSON として不正") from error
             if not isinstance(body, dict):
                 raise RequestError(400, "body は JSON オブジェクト")

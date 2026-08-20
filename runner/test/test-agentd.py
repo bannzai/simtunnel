@@ -28,6 +28,7 @@ USER_BUNDLE_ID = "com.example.sample"
 SLOT_UDIDS = ["UDID-0", "UDID-1"]
 ORIGINAL_STOP_SIGNALS = agentd_module.RECORD_STOP_SIGNALS
 ORIGINAL_READY_TIMEOUT_SECONDS = agentd_module.RECORD_READY_TIMEOUT_SECONDS
+ORIGINAL_MAX_FINISHED_RECORDINGS = agentd_module.MAX_FINISHED_RECORDINGS
 
 # 実 simctl の listapps と同じ OpenStep plist を返し、呼ばれた引数を argv ログへ残すスタブ
 XCRUN_STUB = r"""#!/bin/bash
@@ -169,6 +170,22 @@ class AgentdTestCase(unittest.TestCase):
         self.assertEqual(status, 200, body)
         self.assertGreater(body["bytes"], 0)
 
+    def test_finished_recordings_beyond_limit_are_deleted(self):
+        # 停止済みの録画を際限なく残すと、10 分以内の録画でも本数で runner のディスクを使い切る
+        agentd_module.MAX_FINISHED_RECORDINGS = 2
+        paths = []
+        try:
+            for _ in range(3):
+                _, started = self.post("/v1/record/start", {})
+                status, stopped = self.post("/v1/record/stop", {"recordingId": started["recordingId"]})
+                self.assertEqual(status, 200, stopped)
+                paths.append(stopped["path"])
+        finally:
+            agentd_module.MAX_FINISHED_RECORDINGS = ORIGINAL_MAX_FINISHED_RECORDINGS
+        self.assertFalse(os.path.exists(paths[0]))
+        self.assertFalse(os.path.exists(paths[0] + ".log"))
+        self.assertTrue(all(os.path.exists(path) for path in paths[1:]))
+
     def test_record_start_replaces_running_recording_on_same_slot(self):
         # recordingId を受け取れなかったクライアントの録画を残さない
         _, first = self.post("/v1/record/start", {"slot": 0})
@@ -292,6 +309,17 @@ class AgentdTestCase(unittest.TestCase):
         ):
             status, _ = self.post("/v1/relaunch", {"args": args})
             self.assertEqual(status, 400, args)
+        self.assertEqual(self.simctl_calls(), [])
+
+    def test_nan_and_infinity_in_body_are_rejected(self):
+        # Python の json.loads は NaN / Infinity を受け付けるが JSON の仕様外で、simctl に渡す payload も壊れる
+        for raw in (b'{"payload": {"aps": {"badge": NaN}}}', b'{"payload": {"aps": {"badge": Infinity}}}', b'{"slot": -Infinity}'):
+            request = urllib.request.Request(
+                self.base_url + "/v1/push", data=raw, headers={"Content-Type": "application/json"}, method="POST",
+            )
+            with self.assertRaises(urllib.error.HTTPError) as raised:
+                urllib.request.urlopen(request, timeout=10)
+            self.assertEqual(raised.exception.code, 400, raw)
         self.assertEqual(self.simctl_calls(), [])
 
     def test_unknown_keys_are_rejected(self):
