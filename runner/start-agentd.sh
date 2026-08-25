@@ -10,10 +10,21 @@ WORK="${RUNNER_TEMP:-$(pwd)/tmp}"
 LOG="${WORK}/agentd.log"
 mkdir -p "$WORK"
 
-# --fail: HTTP 404 / 500 でも curl は exit 0 になるため成功ステータスを必須にし、さらに応答に
-# agentd の /status だけが返す "verbs" があることを見る。別プロセスがそのポートを握って 2xx を
-# 返している状態を「起動できた」と誤判定すると、後続の bridge がそのプロセスを tailnet へ公開してしまう
-agentd_alive() { curl -fsS -m 2 "http://127.0.0.1:${PORT}/status" 2>/dev/null | grep -q '"verbs"'; }
+# --fail: HTTP 404 / 500 でも curl は exit 0 になるため成功ステータスを必須にし、さらに応答を
+# JSON として解釈して ok=true と、agentd の許可した動詞の一覧そのもの（agentd.py の verbs() と同値）を
+# 要求する。別プロセスがそのポートを握って 2xx を返している状態を「起動できた」と誤判定すると、
+# 後続の bridge がそのプロセスを tailnet へ公開してしまう
+agentd_alive() {
+  curl -fsS -m 2 "http://127.0.0.1:${PORT}/status" 2>/dev/null | python3 -c '
+import json, sys
+try:
+    status = json.load(sys.stdin)
+except Exception:
+    sys.exit(1)
+expected_verbs = sorted(["relaunch", "push", "record/start", "record/stop", "privacy", "status_bar"])
+sys.exit(0 if status.get("ok") is True and status.get("verbs") == expected_verbs else 1)
+'
+}
 
 if agentd_alive; then
   echo "agentd already running on :${PORT}"

@@ -282,21 +282,31 @@ class Agentd:
             error = f"録画ファイルが空（simctl 終了コード {process.returncode}）: {self.tail_log(recording['log_path'])}"
         else:
             error = None
-        self.retain_finished_recording(recording["path"], recording["log_path"])
+        if error is None:
+            self.retain_finished_recording(recording["path"], recording["log_path"])
+        else:
+            # 失敗した録画を保持枠に数えると、start の失敗の繰り返しだけで有効な録画が押し出される。
+            # 失敗の調査はエラーメッセージに載せた情報（終了コード・ログ末尾）で足りるため、実体は消す
+            self.remove_recording_files(recording["path"], recording["log_path"])
         return recording["path"], size, error
 
     def retain_finished_recording(self, path, log_path):
-        """停止済みの録画を保持リストに加え、上限を超えた古い録画を runner から消す"""
+        """成功した録画を保持リストに加え、上限を超えた古い録画を runner から消す"""
         with self.recordings_lock:
             self.finished_recordings.append((path, log_path))
             expired = self.finished_recordings[:-MAX_FINISHED_RECORDINGS]
             del self.finished_recordings[:-MAX_FINISHED_RECORDINGS]
         for expired_path, expired_log_path in expired:
-            for file_path in (expired_path, expired_log_path):
-                try:
-                    os.remove(file_path)
-                except FileNotFoundError:
-                    pass
+            self.remove_recording_files(expired_path, expired_log_path)
+
+    @staticmethod
+    def remove_recording_files(path, log_path):
+        """録画の動画とログを runner から消す（存在しないファイルは黙って飛ばす）"""
+        for file_path in (path, log_path):
+            try:
+                os.remove(file_path)
+            except FileNotFoundError:
+                pass
 
     @staticmethod
     def terminate_recording(process):

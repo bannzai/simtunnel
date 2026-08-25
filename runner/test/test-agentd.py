@@ -186,6 +186,20 @@ class AgentdTestCase(unittest.TestCase):
         self.assertFalse(os.path.exists(paths[0] + ".log"))
         self.assertTrue(all(os.path.exists(path) for path in paths[1:]))
 
+    def test_failed_recording_is_not_retained(self):
+        # 開始に失敗した録画を保持枠に数えると、失敗の繰り返しだけで有効な録画が押し出される
+        _, ok_recording = self.post("/v1/record/start", {})
+        _, ok_stopped = self.post("/v1/record/stop", {"recordingId": ok_recording["recordingId"]})
+        retained_before = len(self.server.agentd.finished_recordings)
+        os.environ["XCRUN_RECORD_FAIL"] = "1"
+        try:
+            status, _ = self.post("/v1/record/start", {})
+        finally:
+            del os.environ["XCRUN_RECORD_FAIL"]
+        self.assertEqual(status, 500)
+        self.assertEqual(len(self.server.agentd.finished_recordings), retained_before)
+        self.assertTrue(os.path.exists(ok_stopped["path"]))
+
     def test_record_start_replaces_running_recording_on_same_slot(self):
         # recordingId を受け取れなかったクライアントの録画を残さない
         _, first = self.post("/v1/record/start", {"slot": 0})

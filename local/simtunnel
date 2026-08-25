@@ -48,9 +48,11 @@ ensure_repo() {
 }
 
 # --slot は算術式 $((9100 + slot)) に展開されるため、非負の 10 進整数だけを受け付ける
-# （"1+1" のような式が別ポートに解決されるのを防ぐ）
+# （"1+1" のような式が別ポートに解決されるのを防ぐ）。
+# 上限は workflow の simulators 上限 (session.yml の「1〜4」検証) に合わせた 0〜3。
+# 桁の大きい数字は Bash の固定幅整数で折り返して slot 0 に化けるため、上限でまとめて弾く
 validate_slot() {
-  [[ "$1" =~ ^[0-9]+$ ]] || { echo "--slot は 0 以上の整数: $1" >&2; return 1; }
+  [[ "$1" =~ ^[0-3]$ ]] || { echo "--slot は 0〜3 の整数: $1" >&2; return 1; }
 }
 
 ts_bin() {
@@ -408,6 +410,7 @@ import os, sys, time
 start = time.time()
 frames = 0
 last_frame_at = 0.0
+max_frame_gap = 0.0
 buf = b""
 with open(os.environ["OUT"], "wb") as out:
     while True:
@@ -428,12 +431,15 @@ with open(os.environ["OUT"], "wb") as out:
                 break
             out.write(buf[begin:end + 2])
             frames += 1
-            last_frame_at = time.time() - start
+            now = time.time() - start
+            # 最初のフレームまでの待ちも欠落として数える（開始直後の表示が写っていないため）
+            max_frame_gap = max(max_frame_gap, now - last_frame_at)
+            last_frame_at = now
             buf = buf[end + 2:]
 if frames == 0:
     print("フレームを取得できなかった。セッションの準備状態と、MJPEG を他のクライアントが掴んでいないかを確認", file=sys.stderr)
     sys.exit(1)
-print(f"{frames} {time.time() - start:.1f} {last_frame_at:.1f}")
+print(f"{frames} {time.time() - start:.1f} {last_frame_at:.1f} {max_frame_gap:.1f}")
 EOF
 
   # curl の終了コードはパイプの中で失われるためファイルに落として後で判定する
@@ -457,8 +463,8 @@ EOF
     return 1
   fi
 
-  local frames elapsed last_frame_at fps
-  read -r frames elapsed last_frame_at <<<"$result"
+  local frames elapsed last_frame_at max_frame_gap fps
+  read -r frames elapsed last_frame_at max_frame_gap <<<"$result"
 
   # 終了コード 0（サーバ側が正常にストリームを閉じた）でも、指定時間ぶん録れたとは限らない。
   # WDA / Simulator の再起動で途中終了した録画を、確認対象が写っている証跡として扱わない。
@@ -471,6 +477,13 @@ EOF
   # 後半の表示が一切写っていない。最後のフレームの受信時刻にも同じ 90% の基準を当てる
   if awk -v l="$last_frame_at" -v d="$duration" 'BEGIN {exit !(l < d * 0.9)}'; then
     echo "最後のフレームが ${last_frame_at} 秒で途絶え、${duration} 秒の終わりまで届かなかった（MJPEG の滞留。WDA / Simulator の状態を確認）。途中までの録画: ${raw}" >&2
+    return 1
+  fi
+  # 序盤と終了直前だけフレームが届き、途中が長時間欠けた録画も証跡にならない。
+  # 上限 5 秒は実測の最低フレームレート（DERP relay 経由で約 4 fps = 間隔 0.25 秒）に対して
+  # 20 倍の余裕を持たせた値で、通知バナーの表示時間（約 5 秒）より長い欠落を見逃さない
+  if awk -v g="$max_frame_gap" 'BEGIN {exit !(g > 5)}'; then
+    echo "フレームの受信が途中で ${max_frame_gap} 秒途絶えた（MJPEG の滞留。その間の表示は録画に写っていない）。録画: ${raw}" >&2
     return 1
   fi
   fps=$(awk -v f="$frames" -v e="$elapsed" 'BEGIN {printf "%.2f", (e > 0 ? f / e : 0)}')
