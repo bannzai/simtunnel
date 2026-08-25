@@ -334,6 +334,8 @@ class AgentdTestCase(unittest.TestCase):
             {"aps": "not-an-object"},
             {"aps": {}, "Simulator Target Bundle": "com.apple.Maps"},
             {"aps": {"a": {"b": {"c": {"d": {"e": {"f": {"g": 1}}}}}}}},
+            # 1e400 は json.loads で float('inf') になり、dump すると仕様外の JSON になる
+            {"aps": {"badge": 1e400}},
         ):
             status, _ = self.post("/v1/push", {"payload": payload})
             self.assertEqual(status, 400, payload)

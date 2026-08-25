@@ -117,8 +117,10 @@ jobs:
           # （caller 側で type: choice の固定選択肢に限っていても、reusable workflow 単体で成立させる）。
           # 単語分割の前に glob を無効にし、"*" 等がカレントディレクトリのファイル名に置き換わってから
           # 検証されることを防ぐ。拒否した値は public な run ログに出さない
+          # read は最初の行しか読まず、改行入りの値で 2 行目以降が検証を迂回するため、
+          # install/launch スクリプトと同じ「クオート無しの単語分割」で配列化して全単語を検証する
           set -f
-          read -ra LAUNCH_ARG_LIST <<<"$LAUNCH_ARGS"
+          LAUNCH_ARG_LIST=($LAUNCH_ARGS)
           [ "${#LAUNCH_ARG_LIST[@]}" -le 16 ] || {
             echo "launch_args は 16 個まで（${#LAUNCH_ARG_LIST[@]} 個）" >&2
             exit 1

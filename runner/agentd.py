@@ -9,6 +9,7 @@
 スクリプト本文は一切受けない。対象 Simulator はサーバ側が slot から解決し、UDID は受けない。
 """
 import json
+import math
 import os
 import re
 import shlex
@@ -206,6 +207,10 @@ class Agentd:
                     raise RequestError(400, f"payload の配列要素は {MAX_PAYLOAD_KEYS} 個まで")
                 for value in node:
                     walk(value, depth + 1)
+            elif isinstance(node, float) and not math.isfinite(node):
+                # parse_constant は字句の NaN / Infinity しか拒否できず、1e400 のような
+                # オーバーフローは float('inf') になる。そのまま dump すると仕様外の JSON になる
+                raise RequestError(400, "payload の数値が大きすぎる")
             elif not isinstance(node, (str, int, float, bool)) and node is not None:
                 raise RequestError(400, "payload に使えるのは JSON の基本型のみ")
 
