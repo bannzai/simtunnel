@@ -439,6 +439,9 @@ with open(os.environ["OUT"], "wb") as out:
 if frames == 0:
     print("フレームを取得できなかった。セッションの準備状態と、MJPEG を他のクライアントが掴んでいないかを確認", file=sys.stderr)
     sys.exit(1)
+# 最後のフレームから抽出終了までの欠落も最大間隔に含める（last_frame_at の 90% 判定は
+# 指定時間に比例した許容幅のため、長い録画では終端の 5 秒超の欠落がすり抜ける）
+max_frame_gap = max(max_frame_gap, time.time() - start - last_frame_at)
 print(f"{frames} {time.time() - start:.1f} {last_frame_at:.1f} {max_frame_gap:.1f}")
 EOF
 
