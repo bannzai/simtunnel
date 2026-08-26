@@ -34,6 +34,14 @@ on:
         description: "install 後に launch する bundle id（省略時は launch しない）"
         required: false
         default: ""
+      # 起動引数は自由入力にせず固定選択肢から選ぶ（参照: PROJECT.md「起動引数を caller から渡す」）。
+      # サンプルアプリは起動引数を読まないため、uitest は session.yml の launch_args の経路を実 run で確認するためのもの
+      launch_preset:
+        description: "アプリの初回 launch に渡す起動引数のプリセット（uitest = -UITEST 1）"
+        type: choice
+        required: false
+        default: none
+        options: [none, uitest]
       sample_app:
         description: "リポジトリ内のサンプルアプリ (iOSProject) をビルドして launch する"
         required: false
@@ -59,6 +67,8 @@ jobs:
       bundle_id: ${{ inputs.bundle_id }}
       build_project: ${{ inputs.sample_app == 'true' && 'iOSProject/iOSProject.xcodeproj' || '' }}
       build_scheme: ${{ inputs.sample_app == 'true' && 'iOSProject' || '' }}
+      # 選択肢のキーから引数列を引く。実値は workflow 内にハードコードし、run: へ展開しない
+      launch_args: ${{ inputs.launch_preset == 'uitest' && '-UITEST 1' || '' }}
       serve_sim: ${{ inputs.serve_sim }}
     secrets:
       TS_OIDC_CLIENT_ID: ${{ secrets.TS_OIDC_CLIENT_ID }}

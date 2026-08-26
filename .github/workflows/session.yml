@@ -55,6 +55,11 @@ on:
         type: string
         required: false
         default: Debug
+      launch_args:
+        description: "アプリの初回 launch に渡す起動引数（空白区切り。文字種は [A-Za-z0-9_=-] のみ）。caller は type: choice の固定選択肢から選んだ値だけを渡す（参照: PROJECT.md「起動引数を caller から渡す」）"
+        type: string
+        required: false
+        default: ""
       serve_sim:
         description: "serve-sim を起動する（全 Simulator をブラウザから見る・操作する preview UI :3200）"
         type: string
@@ -93,6 +98,7 @@ jobs:
           BUILD_PROJECT: ${{ inputs.build_project }}
           BUILD_SCHEME: ${{ inputs.build_scheme }}
           SIMULATORS: ${{ inputs.simulators }}
+          LAUNCH_ARGS: ${{ inputs.launch_args }}
           JOB_WORKFLOW_SHA: ${{ job.workflow_sha }}
         run: |
           [[ "$SESSION" =~ ^[a-z0-9-]+$ ]] || {
@@ -107,6 +113,26 @@ jobs:
             echo "build_project 指定時は build_scheme も必須" >&2
             exit 1
           fi
+          # 起動引数は simctl launch に argv として渡るため、agentd と同じ制限（文字種・個数・長さ）で絞る
+          # （caller 側で type: choice の固定選択肢に限っていても、reusable workflow 単体で成立させる）。
+          # 単語分割の前に glob を無効にし、"*" 等がカレントディレクトリのファイル名に置き換わってから
+          # 検証されることを防ぐ。拒否した値は public な run ログに出さない
+          # read は最初の行しか読まず、改行入りの値で 2 行目以降が検証を迂回するため、
+          # install/launch スクリプトと同じ「クオート無しの単語分割」で配列化して全単語を検証する
+          set -f
+          LAUNCH_ARG_LIST=($LAUNCH_ARGS)
+          [ "${#LAUNCH_ARG_LIST[@]}" -le 16 ] || {
+            echo "launch_args は 16 個まで（${#LAUNCH_ARG_LIST[@]} 個）" >&2
+            exit 1
+          }
+          for i in "${!LAUNCH_ARG_LIST[@]}"; do
+            arg=${LAUNCH_ARG_LIST[$i]}
+            [[ "$arg" =~ ^[A-Za-z0-9_=-]+$ ]] && [ "${#arg}" -le 64 ] || {
+              echo "launch_args の $((i + 1)) 個目が不正（使えるのは [A-Za-z0-9_=-] のみ・1 個 64 文字まで）" >&2
+              exit 1
+            }
+          done
+          set +f
           # 空だと simtunnel の checkout がデフォルトブランチに落ちて workflow と scripts の版がずれる
           [ -n "$JOB_WORKFLOW_SHA" ] || {
             echo "job.workflow_sha が空。runner スクリプトの版を固定できないため中断" >&2
@@ -152,6 +178,7 @@ jobs:
         env:
           APP_ZIP_URL: ${{ inputs.app_zip_url }}
           BUNDLE_ID: ${{ inputs.bundle_id }}
+          LAUNCH_ARGS: ${{ inputs.launch_args }}
         run: ./simtunnel/runner/install-app.sh
 
       # caller の build job がアップロードした .app（同一 run の artifact）を install する経路。
@@ -169,6 +196,7 @@ jobs:
         timeout-minutes: 10
         env:
           APP_DIR: artifact-app
+          LAUNCH_ARGS: ${{ inputs.launch_args }}
         run: ./simtunnel/runner/install-artifact-app.sh
 
       - name: アプリをビルドして install / launch
@@ -178,6 +206,7 @@ jobs:
           BUILD_PROJECT: ${{ inputs.build_project }}
           BUILD_SCHEME: ${{ inputs.build_scheme }}
           BUILD_CONFIGURATION: ${{ inputs.build_configuration }}
+          LAUNCH_ARGS: ${{ inputs.launch_args }}
         run: ./simtunnel/runner/build-app.sh
 
       # caller リポジトリに .maestro/flows/simtunnel/setup.yml があれば実行する（存在チェックはスクリプト内。無ければスキップ）。
@@ -195,6 +224,11 @@ jobs:
         if: inputs.serve_sim == 'true'
         timeout-minutes: 10
         run: ./simtunnel/runner/start-serve-sim.sh $SIMULATOR_UDIDS
+
+      # simctl の許可した動詞だけを遠隔実行できる受け口（参照: PROJECT.md「simtunnel-agentd」）
+      - name: simtunnel-agentd を起動
+        timeout-minutes: 5
+        run: ./simtunnel/runner/start-agentd.sh $SIMULATOR_UDIDS
 
       # キャッシュミス時のみ保存する。ジョブは down で cancel されるため、
       # post step 任せにせずビルド直後に明示的に保存する
@@ -215,12 +249,13 @@ jobs:
           tags: tag:ci
           hostname: simtunnel-${{ inputs.session }}
 
-      # serve-sim は preview UI とストリーム (/helper/<UDID>/stream.mjpeg) をどちらも :3200 で配信するため 3200 のみ公開する
+      # serve-sim は preview UI とストリーム (/helper/<UDID>/stream.mjpeg) をどちらも :3200 で配信するため 3200 のみ公開する。
+      # agentd は Simulator の台数によらず 1 プロセス（:8200）で全 slot を受ける
       - name: tailnet へブリッジ
         timeout-minutes: 10
         env:
           SIMULATORS: ${{ inputs.simulators }}
-          EXTRA_PORTS: ${{ inputs.serve_sim == 'true' && '3200' || '' }}
+          EXTRA_PORTS: ${{ inputs.serve_sim == 'true' && '3200 8200' || '8200' }}
         run: |
           PORTS=""
           for i in $(seq 0 $((SIMULATORS - 1))); do PORTS="$PORTS $((8100 + i)) $((9100 + i))"; done
@@ -241,6 +276,7 @@ jobs:
             for i in $(seq 0 $((SIMULATORS - 1))); do
               echo "- sim ${i}: WDA http://simtunnel-${SESSION}:$((8100 + i))/status / MJPEG http://simtunnel-${SESSION}:$((9100 + i))"
             done
+            echo "- agentd（許可した simctl 動詞）: http://simtunnel-${SESSION}:8200/status"
             if [ "$SERVE_SIM" = "true" ]; then
               echo "- preview UI（ブラウザ操作）: http://simtunnel-${SESSION}:3200"
               if [ "$SIMULATORS" -gt 1 ]; then

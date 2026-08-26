@@ -24,7 +24,8 @@ GitHub Actions (workflow_dispatch)
 │   ├─ iOS Simulator (iPhone 16 等)
 │   ├─ WebDriverAgent      :8100（操作 API）
 │   ├─ WDA MJPEG server    :9100（画面ストリーミング）
-│   ├─ socat bridge（tailscale IF → 127.0.0.1:8100/9100）
+│   ├─ simtunnel-agentd    :8200（許可した simctl 動詞のみ）
+│   ├─ socat bridge（tailscale IF → 127.0.0.1:8100/9100/8200）
 │   └─ tailscale（ephemeral node / hostname=simtunnel-a1 / tag:ci）
 ├─ Job (session=b1): 同上
 └─ Job (session=b2): 同上
@@ -76,7 +77,7 @@ Tailscale は無料の Personal プラン（デバイス 100 台）で成立す�
 1. **公開エンドポイントゼロ**: WDA / MJPEG は tailnet 内からしか到達できない
 2. **トリガーは `workflow_dispatch` のみ**: 起動できるのは write 権限者だけ。fork からの PR には Secrets / OIDC トークンの権限が渡らない
 3. **長期シークレットを持たない（OIDC / workload identity federation）**: Tailscale への認証は、GitHub が workflow に発行する短命の OIDC トークンで行う。subject がこのリポジトリを指す trust credential の Subject（形式は「Tailscale セットアップ手順」参照）に一致する workflow しか認証できず、盗まれて困る静的シークレットがそもそも存在しない（Secrets の `TS_OIDC_CLIENT_ID` / `TS_OIDC_AUDIENCE` は識別子であり秘密情報ではない）
-4. **Tailscale ACL で双方向を絞る**: 自分のデバイス → `tag:ci` の 8100/9100 のみ許可。`tag:ci` からの発信は全拒否。tailnet 内のローカルデバイスは SSH 等のサービスを listen している可能性がある前提で設計する（Tailscale が与えるのはネットワーク到達性だけでログイン権限ではないが、listen 中のサービスは攻撃面になる）。万一 runner が汚染されても tailnet 内の他デバイスへ発信できないことをこのルールで保証する
+4. **Tailscale ACL で双方向を絞る**: 自分のデバイス → `tag:ci` の 8100+i / 9100+i（WDA / MJPEG）・8200（agentd）・3200（serve-sim）のみ許可。`tag:ci` からの発信は全拒否。tailnet 内のローカルデバイスは SSH 等のサービスを listen している可能性がある前提で設計する（Tailscale が与えるのはネットワーク到達性だけでログイン権限ではないが、listen 中のサービスは攻撃面になる）。万一 runner が汚染されても tailnet 内の他デバイスへ発信できないことをこのルールで保証する
 
 ```jsonc
 // tailnet ポリシーの該当部分（grants 構文）
@@ -101,6 +102,14 @@ Tailscale は無料の Personal プラン（デバイス 100 台）で成立す�
 8. **サードパーティ action は commit SHA で固定**: タグは可変で、action リポジトリが侵害されるとタグごと悪性コードへ差し替えられる。`uses:` はフルレングスの commit SHA + バージョンコメント（例: `actions/checkout@34e11487... # v4.3.1`）で固定する。GitHub 公式推奨の hardening（https://docs.github.com/en/actions/security-for-github-actions/security-guides/security-hardening-for-github-actions#using-third-party-actions ）。バージョン更新時は `gh api repos/<owner>/<repo>/git/ref/tags/<tag>` で SHA を確認して書き換える
 9. **runner スクリプトは workflow と同一 commit に固定**: reusable workflow（session.yml）は runner スクリプトを `job.workflow_repository` / `job.workflow_sha`（= 呼ばれた workflow ファイルの repo と commit SHA。`github.job_workflow_sha` というプロパティは存在しない）で checkout する。caller が `uses:` を SHA 固定していれば、実行されるスクリプトも同じ SHA に固定される
 
+#### 機能追加でこの前提を崩さないための判断基準
+
+公開エンドポイントゼロ・`workflow_dispatch` のみ・長期シークレットなし・`tag:ci` からの発信全拒否は、後から機能を足す時に崩れやすい。次の 3 つは**やらないこと**として固定する。
+
+- **WDA / agentd / serve-sim に認証を足して公開エンドポイントにする方向は採らない**。トークンを付けても、漏れた時点でシミュレータの完全な乗っ取りになる（無認証の操作 API が背後にいるため）。「到達できないこと」が唯一の安全根拠であり、認証はその代替にならない
+- **クライアントから受けた本文（シェルコマンド・スクリプト・Maestro flow YAML 等）を runner で実行する設計は採らない**。runner が実行してよいのは、リポジトリにコミット済みで ref（commit SHA）に固定された内容だけ。可変長の本文を受ける経路を 1 本でも開けると、動詞の許可リストは意味を失う
+- **新しい操作能力を足す時は「主体が増えるのか、能力が増えるだけか」を整理して設計判断に書く**。到達できる相手が増えない（= 既に WDA でシミュレータを完全操作できる tailnet 内の自分のデバイスだけ）なら能力の追加であり、この前提の範囲内。新しい主体が到達できるようになるなら、それは機能追加ではなく前提そのものの変更として扱う
+
 ### 操作レイヤー: 段階的に構築（mobile-mcp の fork はしない）
 
 mobile-mcp は調査の結果、WDA 接続先ハードコード + simctl ローカル直叩きの構造で、fork の改修範囲が広く upstream 追従コストも掛かる。代わりに:
@@ -123,7 +132,74 @@ WDA API は WebDriver 準拠 + 拡張で、必要な操作は全て HTTP で足�
 | URL を開く | `POST /session/:id/url` |
 | 画面ストリーミング | `:9100`（MJPEG。ブラウザ / ffplay で閲覧） |
 
-simctl が必要な操作（アプリの install / launch / terminate 等）は、Phase 1〜3 では workflow の step として GHA 側で実行し、Phase 4 で runner 上の小さな HTTP 受け口（simtunnel-agentd）に置き換える。
+simctl が必要な操作（アプリの launch / terminate、通知の合成等）は、Phase 1〜3 では workflow の step として GHA 側で実行していた。Phase 4 で runner 上の小さな HTTP 受け口（simtunnel-agentd）を足し、セッション開始後にも呼べるようにした（下記「simtunnel-agentd」）。
+
+### 画面の録画: `simtunnel record`
+
+`:9100` の MJPEG は連続ストリームなのに、`simtunnel screenshot` は 1 フレーム抽出しかしない。数秒で消える通知バナーの発火は、撮った瞬間に出ていなければ判別できない（実例: bannzai/mementomorning の初回 QA で、通知バナーの発火確認が「1 フレーム抽出では判別不能」となり判定不能になった）。ストリームをローカルに録り続ける経路を `local/simtunnel record` として足す。
+
+- **クライアント側で録る**（runner 側の `simctl io recordVideo` ではなく）。すでに tailnet に出ている MJPEG をそのまま保存するだけで済み、runner 側に新しい能力を足さずに解決する。録画ファイルは最初からローカルにあるため、DERP relay 越しに動画を取り出す必要もない
+- **録画中は再エンコードしない**。multipart のヘッダだけ落として JPEG フレームをそのまま追記保存する（`.mjpeg` = JPEG の連結）。ローカルの負荷はディスク書き込みが支配的で軽微。mp4 が要る場合だけ、録画終了後に `--mp4`（ffmpeg）で変換する
+- **MJPEG は実質 1 クライアント占有**（Phase 4 の serve-sim 実測と同じ制約）。録画中は `screenshot` / `preview` を併用できない
+- 録画からフレームを切り出す: `ffmpeg -f mjpeg -i <出力.mjpeg> -fps_mode passthrough ./tmp/frame-%04d.jpg`
+- **指定時間ぶん録れなかった録画は失敗として返す**。MJPEG が途中で切れた場合（接続断でも、サーバ側の正常な EOF でも）も、接続が開いたままフレームが届かなくなった場合（最後のフレームの受信時刻が指定時間の 90% に届かない、または途中でフレームの受信が 5 秒を超えて途絶えた）も、確認対象が写っていない証跡を成功として扱わないため
+- **MJPEG は接続を短時間に繰り返すとストリームが早期に閉じる**（実測 2026-08-20: 連続実行で 12 秒指定に対し 2.5〜8.2 秒で EOF になり、間を空けると 11.0〜15.0 秒録れた）。`record` はこれを「指定時間の 90% 未満」で失敗として返すため、失敗したら少し間を空けて再実行する。runner 側の録画（agentd の `record/start`）が動いている間も画面の取り合いになるため、併用しない
+- **ストリームは実時間から数秒遅れて届く**（実測 2026-08-17: HOME を押してから録画に現れるまで約 9 秒。DERP relay のバッファリングによる）。確認したい操作の前に録画を始め、操作から十分あとまで録り続ける
+- 用途: 通知バナー発火の事後確認、E2E 操作の証跡、flaky の再現調査
+
+### simtunnel-agentd（許可リスト式の simctl 受け口）
+
+WDA では届かない領域（起動引数を要する状態の作り込み、通知の合成、権限の許可・拒否、ステータスバーの整形）を遠隔から作れるようにするため、runner 上に `:8200` の HTTP 受け口を置く。**任意コマンドの実行は実装しない。動詞を固定した許可リスト式**にする。
+
+| 動詞 | 対応する simctl | 用途 |
+| --- | --- | --- |
+| `POST /v1/relaunch` | `terminate` + `launch`（起動引数付き） | アプリ起動前に効かせる設定を要する状態の作り込み |
+| `POST /v1/push` | `push`（payload は JSON スキーマ検証） | 通知の合成・通知タップ検証 |
+| `POST /v1/record/start` / `/v1/record/stop` | `io recordVideo` | 必要区間だけの runner 側録画 |
+| `POST /v1/privacy` | `privacy grant/revoke/reset`（service は列挙型） | 権限拒否・許可状態の作り込み |
+| `POST /v1/status_bar` | `status_bar override/clear` | スクリーンショットの整形 |
+
+`record/start` / `record/stop` の引数・応答:
+
+- `POST /v1/record/start`: body は `{"slot": <0 始まりの Simulator 番号。省略時 0>}`。応答 `{"recordingId": "<record/stop に渡す不透明な文字列>", "path": "<runner 上の出力先>", "maxSeconds": 600}`。同じ slot に実行中の録画があれば止めてから開始する（1 slot 1 本）。`recordingId` を受け取れないまま `maxSeconds` を超えると、サーバ側の watchdog が自動停止する
+- `POST /v1/record/stop`: body は `{"recordingId": "<record/start が返した値>"}`。応答 `{"path": "<runner 上の出力先>", "bytes": <ファイルサイズ>}`。runner 上の動画そのものは返さない（「録画ファイルを転送するエンドポイントは持たない」参照）
+
+**主体は増えず、能力だけが増える**: `:8200` に到達できるのは、既に `:8100` の無認証 WDA でシミュレータを完全操作できる tailnet 内の自分のデバイスだけ。新しく到達できる相手は生まれないため、「機能追加でこの前提を崩さないための判断基準」の範囲内に収まる。
+
+安全側の設計（実装は `runner/agentd.py`、検証は `runner/test/test-agentd.py`）:
+
+- クライアントから**コマンド文字列・ファイルパス・スクリプト本文を一切受けない**。受けるのは動詞 + スキーマ検証済みの引数だけで、未知のキーが 1 つでもあれば 400 で拒否する
+- **UDID はサーバ側が解決する**。クライアントは `slot`（0 始まりの Simulator 番号）だけを送り、body に `udid` があれば拒否する
+- **bundleId はこのセッションで install したアプリだけ許可する**。許可リストは別ファイルで持たず、`simctl listapps` の `ApplicationType = User` から毎回引く（runner の Simulator は毎回まっさらなため、ユーザーアプリ = このセッションで install したアプリになる）
+- `relaunch` の起動引数は文字種 `[A-Za-z0-9_=-]`・16 個まで・1 個 64 文字までに制限する
+- `push` の payload は `aps` オブジェクト必須・入れ子 6 段まで・JSON の基本型のみ。宛先の決定をサーバ側に一本化するため、`Simulator Target Bundle` を含む payload は拒否する
+- `simctl spawn` / `openurl` / `keychain` / `addmedia` など、**シミュレータ内での任意実行やホストのファイル参照につながる動詞は追加しない**
+- 呼び出しの監査ログは runner ローカル（`$RUNNER_TEMP/agentd-audit.log`）にだけ記録する。HTTP サーバの既定のアクセスログも stderr ではなくこのファイルへ流し、public repo の run ログ・ステップサマリに値を出さない
+- **録画ファイルを転送するエンドポイントは持たない**。`record/stop` は runner 上のパスとサイズを返すだけにする。DERP relay 経由（実測 約 60KB/s）では動画の取り出しが現実的な時間で終わらず、ローカル側の録画は `simtunnel record` で足りるため
+- **runner 側の録画は 1 slot につき 1 本・最長 10 分・停止済みの保持は直近 5 本**。`record/start` は同じ slot の実行中の録画を止めてから始め、止め忘れた録画もサーバ側の watchdog が打ち切る。応答が届かず `recordingId` を受け取れなかったクライアントは録画を止められず、放っておくとジョブが終わるまで書き続けて runner のディスクを圧迫するため。停止済みの録画も 5 本を超えた分は古いものから動画とログを消す（1 本 10 分の上限だけでは、録画を繰り返すと本数の累積で runner のディスクを使い切る。転送エンドポイントを持たない以上、残す意味があるのは同じセッション中に確認できる直近の数本だけ）
+
+ハマりどころ:
+
+- **WDA / maestro のドライバ（`*.xctrunner`）も User アプリとして `listapps` に並ぶ**（実測 2026-08-17）。これを操作できると `relaunch` でセッション自体を殺せてしまうため、許可リストから除外している
+- **`push` が 200 を返しても、対象アプリが通知許可を得ていなければバナーは表示されない**（実測 2026-08-17。simtunnel のサンプルアプリは通知許可を要求しないため、`push` は成功するが画面には出ない）。バナーの発火を確認したいアプリ側では、通知許可を得た状態を作ってから `push` する
+- **`simctl io recordVideo` をきれいに終わらせられるのは SIGINT だけ**（実測 2026-08-17）。SIGTERM でも SIGKILL でも、その runner のホスト録画が `Resource busy`（`Host recording is already in progress`）のまま残り、以降の `record/start` が全て失敗する。停止は SIGINT を間を置いて 4 回まで送り、SIGKILL は放置するとディスクを食い潰す場合の最後の手段にする。この状態になったセッションでは runner 側の録画を諦め、ローカル側の `simtunnel record` を使う
+- **`record/start` の直後は simctl が SIGINT を取りこぼす**（実測 2026-08-17）。`record/start` は simctl がログに `Recording started` を出す（= 録画が実際に始まる。出力ファイルは停止時にまとめて書かれるため開始判定には使えない）まで待ってから応答を返すことで、直後の `record/stop` でも SIGINT が効くようにしている
+
+呼び出しはセッション名で直接 curl する（専用の CLI サブコマンドは持たない）:
+
+```bash
+curl -s http://simtunnel-<session>:8200/status
+curl -s -X POST http://simtunnel-<session>:8200/v1/relaunch \
+  -H 'Content-Type: application/json' -d '{"slot": 0, "args": ["-UITEST", "1"]}'
+curl -s -X POST http://simtunnel-<session>:8200/v1/push \
+  -H 'Content-Type: application/json' -d '{"payload": {"aps": {"alert": "夜のふりかえりの時間です"}}}'
+curl -s -X POST http://simtunnel-<session>:8200/v1/privacy \
+  -H 'Content-Type: application/json' -d '{"action": "revoke", "service": "photos"}'
+curl -s -X POST http://simtunnel-<session>:8200/v1/status_bar \
+  -H 'Content-Type: application/json' -d '{"time": "09:41", "batteryLevel": 100}'
+```
+
+Tailscale ACL で宛先ポートを列挙している場合は、`8200` を許可対象に追加する（許可していないと tailnet 内からも到達できない）。
 
 ### macOS アプリ対応（issue #23）
 
@@ -211,6 +287,68 @@ SIMTUNNEL_REPO=<owner>/<repo> local/simtunnel up <session> --wait
 ```
 
 **既定 repo（`bannzai/simtunnel`）へのフォールバックはしない。** 対象 repo が決まらない場合はエラーで停止する。フォールバックすると `up` した repo と別の repo を検索することになり、`down` が「実行中 run はない」と冪等成功で空振りして runner を掴んだまま放置される（実測: bannzai/mementomorning で `up` したセッションを、`SIMTUNNEL_REPO` なしの `down` が既定 repo を見て取りこぼした）。同じ理由で、対象 repo は実行のたびに標準エラーへ表示する。
+
+#### 起動引数を caller から渡す: `workflow_dispatch` の `type: choice`（固定選択肢）
+
+起動引数を渡す経路は 2 つある。**どちらでも自由入力（`type: string`）は採らない**。`uses: .../session.yml` で呼ぶ job には `steps` を追加できない（reusable workflow を呼ぶ job はその呼び出しだけで完結する）ため、caller 側で引数列を組み立てる場合は別 job の output を経由する。
+
+**セッション起動後でよい場合（推奨・大半のケース）**: セッションが ready になってから、ローカル側で agentd の `relaunch` に渡す。起動引数を要する設定の多くはアプリ起動前に読まれるだけで、`relaunch`（`terminate` + `launch`）で読み直させれば足りる。この経路は `type: choice` を GitHub Actions input にする必要すらなく、preset 名 → 引数列の対応表をローカルのスクリプト・ドキュメントに置くだけで、agentd 側の文字種・個数・長さ制限（「simtunnel-agentd」参照）がそのまま安全な入力検証になる:
+
+```bash
+simtunnel up <session> --wait
+# preset 名 → 引数列の対応はローカル側で持つ（このリポジトリではなく呼び出し側の運用）
+curl -s -X POST http://simtunnel-<session>:8200/v1/relaunch \
+  -H 'Content-Type: application/json' -d '{"slot": 0, "args": ["-ONBOARDING_DONE", "1"]}'
+```
+
+**アプリの初回 launch から効かせる必要がある場合**: `session.yml` の `launch_args` input に渡す。runner 上の install / launch は `session.yml` と同じ job で行われるため、Simulator の状態を跨がずに起動引数が効く。値は agentd の `relaunch` と同じ制限（文字種 `[A-Za-z0-9_=-]`・16 個まで・1 個 64 文字まで）の検証を reusable workflow 側でも行い、拒否した値は public な run ログに出さない（caller が `type: choice` で絞っていることに依存せず、単体で成立させるため）。このリポジトリ自身の caller（`simulator-session.yml`）も `launch_preset`（`type: choice`）から引数列を引く形にしてあり、サンプルアプリは起動引数を読まないが、この経路を実 run で確認する用途に使える。
+
+caller は `type: choice`（固定選択肢）の input を preset 名として受け、選択肢の実値（引数列）は workflow 内にハードコードして `run:` へ `${{ }}` 直接展開しない:
+
+```yaml
+on:
+  workflow_dispatch:
+    inputs:
+      launch_preset:
+        description: "起動引数のプリセット"
+        type: choice
+        default: none
+        options: [none, onboarding-done, premium]
+
+jobs:
+  # input 値は選択肢のキーとしてだけ使い、引数列は workflow 内のハードコードから選ぶ
+  resolve-args:
+    runs-on: ubuntu-latest
+    outputs:
+      launch_args: ${{ steps.preset.outputs.launch_args }}
+    steps:
+      - id: preset
+        env:
+          LAUNCH_PRESET: ${{ inputs.launch_preset }}
+        run: |
+          case "$LAUNCH_PRESET" in
+            onboarding-done) ARGS="-ONBOARDING_DONE 1" ;;
+            premium) ARGS="-PREMIUM 1" ;;
+            *) ARGS="" ;;
+          esac
+          echo "launch_args=$ARGS" >> "$GITHUB_OUTPUT"
+  session:
+    needs: resolve-args
+    permissions:
+      id-token: write
+      contents: read
+    uses: bannzai/simtunnel/.github/workflows/session.yml@<commit SHA>
+    with:
+      session: ${{ inputs.session }}
+      build_project: MyApp.xcodeproj
+      build_scheme: MyApp
+      launch_args: ${{ needs.resolve-args.outputs.launch_args }}
+    secrets:
+      TS_OIDC_CLIENT_ID: ${{ secrets.TS_OIDC_CLIENT_ID }}
+      TS_OIDC_AUDIENCE: ${{ secrets.TS_OIDC_AUDIENCE }}
+```
+
+`type: choice` を使う原則（選択肢に無い値は dispatch 自体が拒否される・実値は workflow 内にハードコード）はどちらのケースでも共通。代替として「バリエーションごとに caller workflow を分ける」（ファイルそのものが許可リストになる）方式も同等の安全性を持つ。
 
 #### ビルドに自由な step が必要なアプリ（Flutter 等）: build job 分割 + artifact 渡し
 
@@ -433,10 +571,13 @@ simtunnel/
 │   ├── start-wda.sh                  # iOS WDA を build-for-testing（キャッシュ対応）+ test-without-building で起動
 │   ├── start-wda-mac.sh              # WebDriverAgentMac を runner の GUI セッション上で起動（iOS 版の macOS 対応）
 │   ├── start-serve-sim.sh            # serve-sim を起動（ブラウザ操作 UI + ライブ映像を :3200 で配信）
+│   ├── agentd.py                     # simtunnel-agentd: 許可した simctl 動詞だけを :8200 で受ける HTTP サーバ
+│   ├── start-agentd.sh               # agentd.py をバックグラウンド起動して :8200 の応答を待つ
+│   ├── test/test-agentd.py           # agentd の許可リスト検証（xcrun をスタブに差し替えて実行）
 │   ├── bridge.sh                     # socat: tailscale IF → 指定ポート（直接到達可能ならスキップ）
 │   └── keepalive.sh                  # duration_minutes までジョブを維持（WDA 死活監視付き）
 ├── local/
-│   └── simtunnel                     # ローカル CLI: up / down / list / status / screenshot / preview / wait
+│   └── simtunnel                     # ローカル CLI: up / down / list / status / screenshot / record / preview / wait
 └── mcp/                              # simtunnel-mcp（index.mjs。SIMTUNNEL_WDA_URL で接続先指定）
 ```
 
@@ -569,9 +710,11 @@ env = { SIMTUNNEL_WDA_URL = "http://simtunnel-<session>:8100" }
   - `local/simtunnel preview <session>` でブラウザを開く（Host ヘッダから stream URL を組むため MagicDNS 名で開く）
   - **ストリームは実質 1 クライアント占有**（実測）。別のブラウザ（agent-browser 含む）が掴んでいると「No simulator / connecting」のまま繋がらない。繋がらない時はまず他のクライアントを閉じる。「control socket connect timeout」が出た場合は Retry で復旧する
 - [x] mobile-mcp 互換ツール（完了: 2026-07-06）: `mcp__mobile__*` ツール名前提の既存 skill を simtunnel 経由で動かすための互換レイヤーを simtunnel-mcp に追加。詳細は「MCP の登録 > mobile-mcp 互換ツール」
-- [ ] simtunnel-agentd: runner 上の HTTP 受け口（tailnet 内限定）で simctl を遠隔実行
-      （ローカルでビルドした .app を zip で転送 → install → launch のループを可能にする。
-      per-repo 展開によりアプリは各 repo の runner でビルドするため優先度は下がった）
+- [x] simtunnel-agentd（完了: 2026-08-17）: runner 上の HTTP 受け口（:8200 / tailnet 内限定）で、許可した simctl の動詞だけを遠隔実行する（設計:「simtunnel-agentd」）。当初想定していた「.app を zip で転送 → install → launch」は per-repo 展開でアプリを各 repo の runner がビルドするようになったため実装せず、WDA では届かない領域（起動引数・通知・権限・ステータスバー）に絞った
+  - 検証（実 run / iPhone 17 / simulators=1）: 許可した 5 動詞がすべて 200（`status_bar override` は `9:41` / 電池 100% / 4 本アンテナがスクリーンショットに反映、`relaunch` はアプリが前面に戻ることを確認、`record/stop` は runner 上のパスとサイズを返した）。許可外・不正入力は `spawn` / `openurl` が 404、`udid` 指定・範囲外 slot・不正な起動引数・未知のキー・`aps` の無い payload・列挙外の privacy service・範囲外の status_bar 値が 400、セッション外の bundleId が 403
+  - ローカル検証: `python3 runner/test/test-agentd.py`（`xcrun` をスタブに差し替えて実行）
+- [x] クライアント側録画 `simtunnel record`（完了: 2026-08-17）: MJPEG (:9100) をローカルに録画する（設計:「画面の録画」）
+  - 検証（実 run / 2 本）: 25 秒の録画で 229 フレーム（9.2 fps / 13.2MB）と `--mp4` の ffmpeg 変換を確認。別の約 19 秒の録画（81 フレーム / 4.2 fps）で、録画中に起こした画面遷移（アプリ → ホーム画面）が 64 フレーム目として特定できることを確認
 - [x] 1 runner 複数 Simulator（完了: 2026-07-07）: `simulators` input で台数指定。2 台目以降はデバイスの clone を boot し、i 台目の WDA に per-sim の xctestrun コピーで `USE_PORT=8100+i` / `MJPEG_SERVER_PORT=9100+i` を注入する。CLI / mcp-config は `--slot` で台を指定。simulators=2 の実 run で両ポート HTTP 200・サンプルアプリ両台 install・slot 1 のみ tap して独立性をスクリーンショットで確認。ハマり: xctestrun のコピーは `__TESTROOT__` 相対で成果物を参照するため、元と同じディレクトリに置く必要がある。3 台以上のメモリ成立性は未検証
 - [x] serve-sim の複数 Simulator 対応（完了: 2026-07-10）: serve-sim は 1 プロセスで複数 UDID を配信できる（CLI が可変長で UDID を受け、デバイスごとの view は `/?device=<UDID>`、ストリームは `/helper/<UDID>/stream.mjpeg`、一覧は `/grid/api`。すべて :3200）ため、slot ごとの多重起動ではなく **全 UDID を 1 プロセスに渡す方式**を採用。tailnet への公開ポートは :3200 のまま増えず、多重起動によるメモリ増も避けられる（「リポジトリ公開に耐える安全性」の範囲内）
   - `local/simtunnel preview <session> --slot <i>` は `/grid/api` の一覧から clone 命名（boot-simulator.sh の `<デバイス名> simtunnel-<slot+1>`）で UDID を引き当て、`?device=` 付き URL を開く。slot 0 は既定表示のため解決不要

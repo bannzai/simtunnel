@@ -7,8 +7,12 @@
 #   simtunnel list
 #   simtunnel status <session> [--slot 1]
 #   simtunnel screenshot <session> [出力パス] [--slot 1]
+#   simtunnel record <session> [出力パス] [--slot 1] [--duration 30] [--mp4]   # MJPEG を録画（数秒で消える通知バナー等の事後確認）
 #   simtunnel preview <session> [--slot 1]   # ブラウザで preview UI（見る + 操作）を開く
 #   simtunnel mcp-config <session> [ディレクトリ] [--name mobile] [--slot 1]   # ディレクトリ直下の .mcp.json に simtunnel MCP 設定を書き込む
+#
+# MJPEG は実質 1 クライアント占有のため、record 中は screenshot / preview と併用できない。
+# 録画からフレームを切り出す: ffmpeg -f mjpeg -i <出力.mjpeg> -fps_mode passthrough ./tmp/frame-%04d.jpg
 #
 # --slot は複数 Simulator セッション（up --simulators N）の i 台目 (0 始まり) を指す。WDA :8100+i / MJPEG :9100+i
 #
@@ -41,6 +45,14 @@ ensure_repo() {
   fi
   echo "対象リポジトリ: ${REPO} (カレントディレクトリから解決)" >&2
   return 0
+}
+
+# --slot は算術式 $((9100 + slot)) に展開されるため、非負の 10 進整数だけを受け付ける
+# （"1+1" のような式が別ポートに解決されるのを防ぐ）。
+# 上限は workflow の simulators 上限 (session.yml の「1〜4」検証) に合わせた 0〜3。
+# 桁の大きい数字は Bash の固定幅整数で折り返して slot 0 に化けるため、上限でまとめて弾く
+validate_slot() {
+  [[ "$1" =~ ^[0-3]$ ]] || { echo "--slot は 0〜3 の整数: $1" >&2; return 1; }
 }
 
 ts_bin() {
@@ -296,6 +308,7 @@ cmd_status() {
       *) echo "不明なオプション: $1" >&2; return 1 ;;
     esac
   done
+  validate_slot "$slot" || return 1
   local ip
   ip=$(session_ip "$session")
   if [ -z "$ip" ]; then
@@ -316,6 +329,7 @@ cmd_screenshot() {
       *) out=$1; shift ;;
     esac
   done
+  validate_slot "$slot" || return 1
   [ -n "$out" ] || out="./tmp/simtunnel-${session}-$(date +%H%M%S).jpg"
   local ip
   ip=$(session_ip "$session")
@@ -341,6 +355,152 @@ print(f"saved: {os.environ['OUT']} ({end + 2 - start} bytes)")
 EOF
 }
 
+# MJPEG (:9100) のストリームを録画する。1 フレーム抽出（screenshot）では捉えられない
+# 数秒で消える通知バナー等を事後確認するための経路。
+# 画像は再エンコードせず、multipart のヘッダだけ落として JPEG フレームをそのまま追記保存する
+# （ローカルの負荷はディスク書き込みが支配的）。mp4 が要る場合だけ録画終了後に ffmpeg で変換する
+cmd_record() {
+  local session=$1; shift
+  local out="" slot=0 duration=30 mp4=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --slot) slot=$2; shift 2 ;;
+      --duration) duration=$2; shift 2 ;;
+      --mp4) mp4=1; shift ;;
+      *) out=$1; shift ;;
+    esac
+  done
+  validate_slot "$slot" || return 1
+  [[ "$duration" =~ ^[0-9]+$ ]] && [ "$duration" -ge 1 ] || {
+    echo "--duration は 1 以上の整数（秒）: ${duration}" >&2
+    return 1
+  }
+  if [ "$mp4" -eq 1 ] && ! command -v ffmpeg >/dev/null 2>&1; then
+    echo "--mp4 には ffmpeg が必要（brew install ffmpeg）" >&2
+    return 1
+  fi
+  # 既定名は slot と PID まで含めて一意にする（同じ slot・同じ秒に 2 本走らせても、
+  # 後発の Python が先発の録画ファイルを wb で開いて切り詰めることがないように）
+  [ -n "$out" ] || out="./tmp/simtunnel-${session}-slot${slot}-$(date +%H%M%S)-$$.mjpeg"
+  # --mp4 では ffmpeg の入力と出力を必ず別パスにする
+  # （出力パスに .mp4 を渡された時、録画先と変換先が同じファイルになるため）
+  local raw="$out" mp4_out=""
+  if [ "$mp4" -eq 1 ]; then
+    # 拡張子の除去はファイル名の 2 文字目以降に「.」がある時だけ行う。
+    # ディレクトリ側の「.」を拡張子と誤認せず（"./tmp/rec"）、
+    # 隠しファイル名の先頭のドットも拡張子として食わない（"./tmp/.record"）
+    local stem=$out
+    case "${out##*/}" in
+      ?*.*) stem="${out%.*}" ;;
+    esac
+    raw="${stem}.mjpeg"
+    mp4_out="${stem}.mp4"
+  fi
+  local ip
+  ip=$(session_ip "$session")
+  [ -n "$ip" ] || { echo "simtunnel-${session} は tailnet に存在しない" >&2; return 1; }
+
+  mkdir -p "$(dirname "$raw")"
+  echo "録画中（${duration} 秒 / slot ${slot}）... MJPEG は 1 クライアント占有のため screenshot / preview は同時に使えない"
+  # ストリームを stdin で受けるため、抽出スクリプトは `python3 -` ではなく -c で渡す
+  # （heredoc を stdin に載せると、python がスクリプトを読んだ時点で stdin を使い切る）
+  local extract
+  IFS= read -r -d '' extract <<'EOF' || true
+import os, sys, time
+start = time.time()
+frames = 0
+last_frame_at = 0.0
+max_frame_gap = 0.0
+buf = b""
+with open(os.environ["OUT"], "wb") as out:
+    while True:
+        # read(n) は n バイト揃うか EOF まで返らず、ストリームが止まっても受信時刻を記録できない。
+        # 届いた分だけ返す read1 で読み、フレームの受信時刻を実際の到着に合わせる
+        chunk = sys.stdin.buffer.read1(65536)
+        if not chunk:
+            break
+        buf += chunk
+        while True:
+            begin = buf.find(b"\xff\xd8")
+            if begin < 0:
+                buf = buf[-1:]
+                break
+            end = buf.find(b"\xff\xd9", begin + 2)
+            if end < 0:
+                buf = buf[begin:]
+                break
+            out.write(buf[begin:end + 2])
+            frames += 1
+            now = time.time() - start
+            # 最初のフレームまでの待ちも欠落として数える（開始直後の表示が写っていないため）
+            max_frame_gap = max(max_frame_gap, now - last_frame_at)
+            last_frame_at = now
+            buf = buf[end + 2:]
+if frames == 0:
+    print("フレームを取得できなかった。セッションの準備状態と、MJPEG を他のクライアントが掴んでいないかを確認", file=sys.stderr)
+    sys.exit(1)
+# 最後のフレームから抽出終了までの欠落も最大間隔に含める（last_frame_at の 90% 判定は
+# 指定時間に比例した許容幅のため、長い録画では終端の 5 秒超の欠落がすり抜ける）
+max_frame_gap = max(max_frame_gap, time.time() - start - last_frame_at)
+print(f"{frames} {time.time() - start:.1f} {last_frame_at:.1f} {max_frame_gap:.1f}")
+EOF
+
+  # curl の終了コードはパイプの中で失われるためファイルに落として後で判定する
+  # 補助ファイルは出力先の隣に固定名で置かず一時ファイルにする（無関係な
+  # <録画先>.stats 等を上書き・削除しないため）
+  local curl_exit_file stats_file extract_ok=1
+  curl_exit_file=$(mktemp)
+  stats_file=$(mktemp)
+  { curl -sN -m "$duration" "http://${ip}:$((9100 + slot))"; echo $? >"$curl_exit_file"; } \
+    | OUT="$raw" python3 -c "$extract" >"$stats_file" || extract_ok=0
+  local result curl_exit
+  result=$(cat "$stats_file")
+  curl_exit=$(cat "$curl_exit_file")
+  rm -f "$curl_exit_file" "$stats_file"
+  [ "$extract_ok" -eq 1 ] || return 1
+
+  # 28 は --max-time による打ち切り = 指定時間ぶん録れたということ。それ以外の失敗は
+  # 途中でストリームが切れているため、短い録画を成功として報告しない
+  if [ "$curl_exit" != "0" ] && [ "$curl_exit" != "28" ]; then
+    echo "録画中にストリームが切れた（curl 終了コード ${curl_exit}）。途中までの録画: ${raw}" >&2
+    return 1
+  fi
+
+  local frames elapsed last_frame_at max_frame_gap fps
+  read -r frames elapsed last_frame_at max_frame_gap <<<"$result"
+
+  # 終了コード 0（サーバ側が正常にストリームを閉じた）でも、指定時間ぶん録れたとは限らない。
+  # WDA / Simulator の再起動で途中終了した録画を、確認対象が写っている証跡として扱わない。
+  # 許容幅は指定時間の 10%（--duration 1 でも早期 EOF を検出できるよう、固定の 1 秒引きにしない）
+  if awk -v e="$elapsed" -v d="$duration" 'BEGIN {exit !(e < d * 0.9)}'; then
+    echo "指定した ${duration} 秒に対して ${elapsed} 秒で MJPEG が終了した（WDA / Simulator の状態を確認）。途中までの録画: ${raw}" >&2
+    return 1
+  fi
+  # 接続が開いたまま（curl 終了コード 28 = 時間満了）でも、途中からフレームが届かなくなった録画は
+  # 後半の表示が一切写っていない。最後のフレームの受信時刻にも同じ 90% の基準を当てる
+  if awk -v l="$last_frame_at" -v d="$duration" 'BEGIN {exit !(l < d * 0.9)}'; then
+    echo "最後のフレームが ${last_frame_at} 秒で途絶え、${duration} 秒の終わりまで届かなかった（MJPEG の滞留。WDA / Simulator の状態を確認）。途中までの録画: ${raw}" >&2
+    return 1
+  fi
+  # 序盤と終了直前だけフレームが届き、途中が長時間欠けた録画も証跡にならない。
+  # 上限 5 秒は実測の最低フレームレート（DERP relay 経由で約 4 fps = 間隔 0.25 秒）に対して
+  # 20 倍の余裕を持たせた値で、通知バナーの表示時間（約 5 秒）より長い欠落を見逃さない
+  if awk -v g="$max_frame_gap" 'BEGIN {exit !(g > 5)}'; then
+    echo "フレームの受信が途中で ${max_frame_gap} 秒途絶えた（MJPEG の滞留。その間の表示は録画に写っていない）。録画: ${raw}" >&2
+    return 1
+  fi
+  fps=$(awk -v f="$frames" -v e="$elapsed" 'BEGIN {printf "%.2f", (e > 0 ? f / e : 0)}')
+  echo "saved: ${raw} (${frames} フレーム / ${elapsed} 秒 / ${fps} fps / $(wc -c <"$raw" | tr -d ' ') bytes)"
+
+  if [ "$mp4" -eq 1 ]; then
+    # フレーム間隔は実測の平均で近似する（ffmpeg は 0 fps を受け付けないため下限 1）
+    ffmpeg -y -loglevel error -f mjpeg \
+      -framerate "$(awk -v r="$fps" 'BEGIN {printf "%.2f", (r >= 1 ? r : 1)}')" \
+      -i "$raw" -pix_fmt yuv420p "$mp4_out" || { echo "mp4 への変換に失敗" >&2; return 1; }
+    echo "converted: ${mp4_out}"
+  fi
+}
+
 # 指定ディレクトリ（既定はカレント）直下の .mcp.json に simtunnel MCP サーバの設定を書き込む。
 # 既存の .mcp.json があれば対象サーバ名以外のエントリは保持してマージする（冪等）。
 # --name mobile にすると mcp__mobile__* のツール名になり、mobile-mcp 前提の既存 skill と互換になる
@@ -355,6 +515,7 @@ cmd_mcp_config() {
       *) dir=$1; shift ;;
     esac
   done
+  validate_slot "$slot" || return 1
   command -v jq >/dev/null 2>&1 || { echo "jq が必要（brew install jq）" >&2; return 1; }
   [ -d "$dir" ] || { echo "ディレクトリが存在しない: $dir" >&2; return 1; }
 
@@ -400,6 +561,7 @@ cmd_preview() {
       *) echo "不明なオプション: $1" >&2; return 1 ;;
     esac
   done
+  validate_slot "$slot" || return 1
   local ip
   ip=$(session_ip "$session")
   [ -n "$ip" ] || { echo "simtunnel-${session} は tailnet に存在しない" >&2; return 1; }
@@ -430,7 +592,7 @@ cmd_preview() {
 main() {
   local cmd=${1:-}
   case "$cmd" in
-    up|down|status|screenshot|wait|preview)
+    up|down|status|screenshot|record|wait|preview)
       [ $# -ge 2 ] || { echo "session 名を指定して: simtunnel ${cmd} <session>" >&2; exit 1; }
       shift
       "cmd_${cmd}" "$@"
@@ -444,7 +606,7 @@ main() {
       cmd_list
       ;;
     *)
-      sed -n '2,11p' "$0" | sed 's/^# \{0,1\}//'
+      sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'
       exit 1
       ;;
   esac
