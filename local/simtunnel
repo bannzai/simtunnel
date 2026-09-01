@@ -31,9 +31,10 @@ usage() {
 }
 
 validate_session_name() {
-  case "$1" in
-    -*) echo "session 名は - で開始できない: $1" >&2; return 1 ;;
-  esac
+  [[ "$1" =~ ^[a-z0-9][a-z0-9-]*$ ]] || {
+    echo "session 名は小文字英数字で始まり、小文字英数字とハイフンのみ使用できる: $1" >&2
+    return 1
+  }
 }
 
 # GitHub の run を扱うコマンド（up / down / list）用に $REPO を確定する。

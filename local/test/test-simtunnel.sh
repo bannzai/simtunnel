@@ -89,17 +89,25 @@ assert_help_without_dispatch 0 up --help
 assert_help_without_dispatch 0 up -h
 assert_help_without_dispatch 1 up
 
-: >"$gh_log"
-if output=$(run_simtunnel up -mistaken-flag 2>&1); then
-  echo "- で始まる session 名が受理された" >&2
-  exit 1
-fi
-grep -q 'session 名は - で開始できない: -mistaken-flag' <<<"$output"
-if [ -s "$gh_log" ]; then
-  echo "不正な session 名で GitHub CLI が呼ばれた" >&2
-  cat "$gh_log" >&2
-  exit 1
-fi
+assert_invalid_session_without_dispatch() {
+  local session=$1
+  local output
+  : >"$gh_log"
+  if output=$(run_simtunnel up "$session" 2>&1); then
+    echo "不正な session 名が受理された: ${session}" >&2
+    return 1
+  fi
+  grep -q 'session 名は小文字英数字で始まり、小文字英数字とハイフンのみ使用できる' <<<"$output"
+  if [ -s "$gh_log" ]; then
+    echo "不正な session 名で GitHub CLI が呼ばれた: ${session}" >&2
+    cat "$gh_log" >&2
+    return 1
+  fi
+}
+
+assert_invalid_session_without_dispatch -mistaken-flag
+assert_invalid_session_without_dispatch ""
+assert_invalid_session_without_dispatch bad/name
 
 rm -f "$session_ready"
 : >"$gh_log"
