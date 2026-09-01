@@ -26,6 +26,16 @@ set -euo pipefail
 REPO="${SIMTUNNEL_REPO:-}"
 WORKFLOW="${SIMTUNNEL_WORKFLOW:-simulator-session.yml}"
 
+usage() {
+  sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'
+}
+
+validate_session_name() {
+  case "$1" in
+    -*) echo "session 名は - で開始できない: $1" >&2; return 1 ;;
+  esac
+}
+
 # GitHub の run を扱うコマンド（up / down / list）用に $REPO を確定する。
 # 解決できない時に既定 repo へフォールバックすると、up した repo と別の repo を検索して
 # down が「run はない」と冪等成功で空振りするため、フォールバックせずエラーにする。
@@ -590,23 +600,48 @@ cmd_preview() {
 }
 
 main() {
+  local arg
+  for arg in "$@"; do
+    case "$arg" in
+      -h|--help)
+        usage
+        return 0
+        ;;
+    esac
+  done
+
+  if [ $# -eq 0 ]; then
+    usage
+    return 0
+  fi
+
   local cmd=${1:-}
   case "$cmd" in
     up|down|status|screenshot|record|wait|preview)
-      [ $# -ge 2 ] || { echo "session 名を指定して: simtunnel ${cmd} <session>" >&2; exit 1; }
+      [ $# -ge 2 ] || {
+        echo "session 名を指定して: simtunnel ${cmd} <session>" >&2
+        usage >&2
+        exit 1
+      }
       shift
+      validate_session_name "$1" || exit 1
       "cmd_${cmd}" "$@"
       ;;
     mcp-config)
-      [ $# -ge 2 ] || { echo "session 名を指定して: simtunnel mcp-config <session>" >&2; exit 1; }
+      [ $# -ge 2 ] || {
+        echo "session 名を指定して: simtunnel mcp-config <session>" >&2
+        usage >&2
+        exit 1
+      }
       shift
+      validate_session_name "$1" || exit 1
       cmd_mcp_config "$@"
       ;;
     list)
       cmd_list
       ;;
     *)
-      sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'
+      usage
       exit 1
       ;;
   esac
