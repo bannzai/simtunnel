@@ -25,7 +25,7 @@ BUILD_ARGS=(
   -configuration "$CONFIGURATION"
 )
 
-if [ -n "${BUILD_EXTRA_ARGS:-}" ]; then
+if [[ "${BUILD_EXTRA_ARGS:-}" =~ [^[:space:]] ]]; then
   # shell として再評価せず、空白区切りの各要素を xcodebuild の argv として渡す。
   # glob 展開を無効にし、"*" 等が caller repo 内のファイル名へ置き換わることを防ぐ。
   set -f

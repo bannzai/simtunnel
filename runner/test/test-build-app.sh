@@ -93,6 +93,9 @@ build
 EOF
 assert_xcodebuild_args "${TEST_ROOT}/expected-without-extra-args"
 
+run_build BUILD_EXTRA_ARGS=$' \t\n '
+assert_xcodebuild_args "${TEST_ROOT}/expected-without-extra-args"
+
 run_build BUILD_EXTRA_ARGS="-skipPackagePluginValidation COMPILER_INDEX_STORE_ENABLE=NO"
 cat >"${TEST_ROOT}/expected-with-extra-args" <<EOF
 -project
