@@ -69,7 +69,7 @@ run_build() {
     BUILD_SCHEME="App" \
     BUILD_CONFIGURATION="Debug" \
     "$@" \
-    bash "${REPO_ROOT}/runner/build-app.sh" >/dev/null
+    "${REPO_ROOT}/runner/build-app.sh" >/dev/null
 }
 
 assert_xcodebuild_args() {
