@@ -235,6 +235,7 @@ GitHub の Additional Product Terms は、GitHub-hosted runner の用途を「wo
 - OIDC token の subject は **caller repo 基準**になるため、アプリ repo 側に Secrets（`TS_OIDC_CLIENT_ID` / `TS_OIDC_AUDIENCE`）の登録が必要。trust credential は **subject ワイルドカード（`repo:<owner>@<owner_id>/*` 形式）が使える**（旧形式 `repo:<owner>/*` で 2026-07-06、現行形式で 2026-08-13 に検証済み。Tailscale docs の「Values can contain an `*`」のとおり動作）ため、1 credential + 同一 Secrets 値で複数 repo をカバーできる。トレードオフ: オーナー配下の任意 repo の workflow が tag:ci の auth key を発行できるようになる（tag:ci は ACL で発信全拒否のため影響は限定的）。repo 単位に絞りたい場合は Subject `repo:<owner>@<owner_id>/<repo>@<repo_id>:*` で個別発行する（subject の形式は「Tailscale セットアップ手順」参照）
 - Actions cache は repo 単位のため、アプリ repo ごとに初回 run は WDA ビルドが走る（2 回目以降はキャッシュヒット）
 - ビルド対象は input（`build_project` / `build_scheme` / `build_configuration`）で渡す。`build_project` は caller repo ルート相対の .xcodeproj / .xcworkspace パス。bundle id はビルド成果物から自動取得する
+- 標準の xcodebuild に追加の引数が必要な場合は、空白区切りの `build_extra_args` で渡す（例: Swift Package の build tool plugin に必要な `-skipPackagePluginValidation`）。各引数に空白は含められない。SDK セットアップやビルド前処理など自由な step が必要な場合だけ、後述の build job + artifact 経路を使う
 
 caller workflow の例（アプリ repo の `.github/workflows/simulator-session.yml`）:
 
@@ -272,6 +273,7 @@ jobs:
       duration_minutes: ${{ inputs.duration_minutes }}
       build_project: MyApp.xcodeproj
       build_scheme: MyApp
+      build_extra_args: -skipPackagePluginValidation
     secrets:
       TS_OIDC_CLIENT_ID: ${{ secrets.TS_OIDC_CLIENT_ID }}
       TS_OIDC_AUDIENCE: ${{ secrets.TS_OIDC_AUDIENCE }}
@@ -353,6 +355,8 @@ jobs:
 #### ビルドに自由な step が必要なアプリ（Flutter 等）: build job 分割 + artifact 渡し
 
 `build_project` input（xcodebuild 直叩き）で表現できないビルド（Flutter の SDK セットアップ、ビルド前の secret 復元等）は、caller 側の **build job** で自由にビルドして Simulator 用 .app を artifact にアップロードし、session job へ `app_artifact` input で渡す。
+
+自前の build job でも Simulator 用アプリの署名は省かない。runner に開発証明書がなくても `CODE_SIGNING_ALLOWED=NO` は使わず、証明書不要の ad-hoc 署名（Xcode の Sign to Run Locally 相当）として `CODE_SIGN_IDENTITY=-` を使う。署名を丸ごと省くと `application-identifier` entitlement が埋め込まれず、Keychain を使う Firebase Auth などの SDK が Simulator 上で失敗する。
 
 - secrets はネイティブに build job の step へ渡せる（reusable workflow に app 固有 secrets を通す必要がない）
 - artifact の転送は GitHub 内部で完結するため DERP 帯域の制約を受けない

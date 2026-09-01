@@ -55,6 +55,11 @@ on:
         type: string
         required: false
         default: Debug
+      build_extra_args:
+        description: "build_project の xcodebuild に追加で渡す引数（空白区切り。各引数に空白は含められない）"
+        type: string
+        required: false
+        default: ""
       launch_args:
         description: "アプリの初回 launch に渡す起動引数（空白区切り。文字種は [A-Za-z0-9_=-] のみ）。caller は type: choice の固定選択肢から選んだ値だけを渡す（参照: PROJECT.md「起動引数を caller から渡す」）"
         type: string
@@ -206,6 +211,7 @@ jobs:
           BUILD_PROJECT: ${{ inputs.build_project }}
           BUILD_SCHEME: ${{ inputs.build_scheme }}
           BUILD_CONFIGURATION: ${{ inputs.build_configuration }}
+          BUILD_EXTRA_ARGS: ${{ inputs.build_extra_args }}
           LAUNCH_ARGS: ${{ inputs.launch_args }}
         run: ./simtunnel/runner/build-app.sh
 
