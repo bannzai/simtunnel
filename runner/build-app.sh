@@ -17,13 +17,26 @@ case "$PROJECT" in
   *) CONTAINER=(-project "${ROOT}/${PROJECT}") ;;
 esac
 
-xcodebuild \
-  "${CONTAINER[@]}" \
-  -scheme "$SCHEME" \
-  -destination "platform=iOS Simulator,id=${UDID}" \
-  -derivedDataPath "$DD" \
-  -configuration "$CONFIGURATION" \
-  build >"${WORK}/app-build.log" 2>&1 || {
+BUILD_ARGS=(
+  "${CONTAINER[@]}"
+  -scheme "$SCHEME"
+  -destination "platform=iOS Simulator,id=${UDID}"
+  -derivedDataPath "$DD"
+  -configuration "$CONFIGURATION"
+)
+
+if [[ "${BUILD_EXTRA_ARGS:-}" =~ [^[:space:]] ]]; then
+  # shell として再評価せず、空白区切りの各要素を xcodebuild の argv として渡す。
+  # glob 展開を無効にし、"*" 等が caller repo 内のファイル名へ置き換わることを防ぐ。
+  set -f
+  # shellcheck disable=SC2206
+  EXTRA_ARGS=($BUILD_EXTRA_ARGS)
+  set +f
+  BUILD_ARGS+=("${EXTRA_ARGS[@]}")
+fi
+BUILD_ARGS+=(build)
+
+xcodebuild "${BUILD_ARGS[@]}" >"${WORK}/app-build.log" 2>&1 || {
   echo "アプリのビルドに失敗。ログ末尾:" >&2
   tail -n 150 "${WORK}/app-build.log" >&2
   exit 1

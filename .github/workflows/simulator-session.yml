@@ -46,6 +46,10 @@ on:
         description: "リポジトリ内のサンプルアプリ (iOSProject) をビルドして launch する"
         required: false
         default: "true"
+      build_extra_args:
+        description: "サンプルアプリの xcodebuild に追加で渡す引数（空白区切り）"
+        required: false
+        default: ""
       serve_sim:
         description: "serve-sim を起動する（ブラウザから見る・操作する preview UI :3200 / stream :3100）"
         required: false
@@ -67,6 +71,7 @@ jobs:
       bundle_id: ${{ inputs.bundle_id }}
       build_project: ${{ inputs.sample_app == 'true' && 'iOSProject/iOSProject.xcodeproj' || '' }}
       build_scheme: ${{ inputs.sample_app == 'true' && 'iOSProject' || '' }}
+      build_extra_args: ${{ inputs.build_extra_args }}
       # 選択肢のキーから引数列を引く。実値は workflow 内にハードコードし、run: へ展開しない
       launch_args: ${{ inputs.launch_preset == 'uitest' && '-UITEST 1' || '' }}
       serve_sim: ${{ inputs.serve_sim }}
