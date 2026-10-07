@@ -25,7 +25,6 @@ GitHub Actions の macOS Runner 上で iOS Simulator + WebDriverAgent を起動�
 - スクリーンショット: `local/simtunnel screenshot <session>` で ./tmp に保存して Read する。`GET /screenshot` は DERP relay 経由だと 1 分超かかるため使わない（参照: PROJECT.md「Phase 1 実測」）
 - 数秒で消える表示（通知バナー等）の確認: `local/simtunnel record <session>` で録画し、フレームを切り出して Read する。録画中は screenshot / preview を併用できない
 - agentd: `runner/test/test-agentd.py` が全て PASS すること。実セッションでは `http://simtunnel-<session>:8200/status` が HTTP 200 を返すこと
-- ローカルの検証一式: 引数なしの `make` (`verify` target) で `runner/test/test-agentd.py` と `runner/test/test-build-app.sh` を実行する。どちらも simulator・Xcode なしで動く
 
 <!-- ai-review-config begin -->
 <!--
