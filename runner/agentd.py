@@ -466,7 +466,17 @@ def make_handler(agentd):
             if self.path.split("?")[0] != "/status":
                 self.respond(404, {"error": "not found"})
                 return
-            self.respond(200, {"ok": True, "slots": len(agentd.udids), "verbs": sorted(verbs)})
+            # run_id: ローカルの CLI が、接続先のノードを自分の dispatch した run が起動したものか照合するために返す。
+            # ホスト名は tailnet の任意のノードが名乗れ、tailscale のノード情報には run id が載らないため
+            self.respond(
+                200,
+                {
+                    "ok": True,
+                    "slots": len(agentd.udids),
+                    "verbs": sorted(verbs),
+                    "run_id": os.environ.get("GITHUB_RUN_ID", ""),
+                },
+            )
 
         def do_POST(self):
             path = self.path.split("?")[0]

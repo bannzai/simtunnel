@@ -76,23 +76,30 @@ ts_bin() {
 
 # $REPO で実行中の session の run が起動した simtunnel-<session> の IPv4 を返す（検証できるノードが無ければ空）。
 # ホスト名は任意の tailnet ノードが名乗れる値で身元の確認に使えないため、OIDC で参加した runner だけが持つ
-# tag:ci と、in_progress の run の作成後に参加したノードであることを確かめる。
-# tailscale のノード情報には run id が載らないため、run id で特定した run とはノードの作成時刻で照合する
-# （先に同名で登録しておいたノードは、run より前に作成されているので採用しない）。
+# tag:ci と、ノード上の agentd が返す run_id が $REPO の in_progress の run id のどれかと一致することを確かめる
+# （tailscale のノード情報には run id が載らない）。同名のノードが先にいると後から参加したノードの MagicDNS 名には
+# 接尾辞が付くため、名前は MagicDNS 名ではなく、ノードが申告した HostName で絞る。
 # 終了済みセッションの node が offline のまま一覧に残ることがあるため、offline の peer は対象にしない。
 # 前提: $REPO が確定していること（ensure_repo 済み）
 session_ip() {
   local session=$1
-  "$(ts_bin)" status --json 2>/dev/null | jq -r \
+  local run_ids candidate_ip agentd_run_id
+  run_ids=$(session_in_progress_run_ids "$session")
+  [ -n "$run_ids" ] || return 0
+  for candidate_ip in $("$(ts_bin)" status --json 2>/dev/null | jq -r \
     --arg host "simtunnel-${session}" \
-    --arg run_created "$(session_in_progress_run_created "$session")" \
-    '($run_created | split("\n") | map(select(. != ""))) as $runs
-     | [.Peer[]?
-        | select(((.DNSName // "") | split(".")[0]) == $host)
-        | select(.Online == true)
-        | select((.Tags // []) | index("tag:ci"))
-        | select(.Created[0:19] as $node_created | any($runs[]; $node_created >= .[0:19]))
-        | .TailscaleIPs[]? | select(test("^[0-9.]+$"))][0] // empty' 2>/dev/null || true
+    '.Peer[]?
+     | select(.HostName == $host)
+     | select(.Online == true)
+     | select((.Tags // []) | index("tag:ci"))
+     | [.TailscaleIPs[]? | select(test("^[0-9.]+$"))][0] // empty' 2>/dev/null); do
+    # 打ち切りは cmd_status が WDA の /status に使う 10 秒にそろえる（どちらも DERP relay 経由の遅延を見込む）
+    agentd_run_id=$(curl -fsS -m 10 "http://${candidate_ip}:8200/status" 2>/dev/null | jq -r '.run_id // empty' 2>/dev/null) || continue
+    if [ -n "$agentd_run_id" ] && grep -qxF "$agentd_run_id" <<<"$run_ids"; then
+      echo "$candidate_ip"
+      return 0
+    fi
+  done
 }
 
 # session_ip の前提（jq と $REPO の確定）を揃える。up から cmd_wait に入った時は確定済みの $REPO を使う
@@ -109,14 +116,14 @@ session_runs() {
     --jq ".[] | select(.status != \"completed\") | select(.displayTitle | startswith(\"session=${session} \")) | [.databaseId, .status, .headBranch, .headSha] | @tsv"
 }
 
-# session 名に一致する in_progress の run の作成時刻を 1 行ずつ返す。
+# session 名に一致する in_progress の run id を 1 行ずつ返す。
 # ノードは run の job が動いている間だけ参加するため in_progress に絞り、完了済みの後続 run で
 # 稼働中の run が -L の件数から押し出されないようにする
-session_in_progress_run_created() {
+session_in_progress_run_ids() {
   local session=$1
   gh run list -R "$REPO" --workflow "$WORKFLOW" --status in_progress -L 50 \
-    --json displayTitle,createdAt \
-    --jq ".[] | select(.displayTitle | startswith(\"session=${session} \")) | .createdAt"
+    --json databaseId,displayTitle \
+    --jq ".[] | select(.displayTitle | startswith(\"session=${session} \")) | .databaseId"
 }
 
 # simtunnel-<session> を名乗る online の node が tailnet にあるか（身元は確かめない）。
@@ -311,7 +318,7 @@ cmd_wait() {
     local ip
     ip=$(session_ip "$session")
     if [ -n "$ip" ] && [ "$(curl -s -m 3 -o /dev/null -w '%{http_code}' "http://${ip}:8100/status" 2>/dev/null)" = "200" ]; then
-      echo "ready: http://simtunnel-${session}:8100 (${ip})"
+      echo "ready: http://${ip}:8100"
       return 0
     fi
     sleep 15
@@ -626,7 +633,8 @@ cmd_preview() {
   local ip
   ip=$(session_ip "$session")
   [ -n "$ip" ] || { echo "simtunnel-${session} は tailnet に存在しない" >&2; return 1; }
-  local url="http://simtunnel-${session}:3200"
+  # MagicDNS 名は同名を先に名乗ったノードへ解決されるため、session_ip で検証したノードの IP を開く
+  local url="http://${ip}:3200"
   if [ "$slot" -gt 0 ]; then
     # /grid/api は runner 上の全 Simulator を返すため、Booted かつ clone 名のものに絞る。
     # 初回コールは一覧が温まっておらず空を返すことがある（実測）ためリトライする
