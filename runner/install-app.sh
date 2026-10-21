@@ -13,10 +13,32 @@ if [ -z "$APP_ZIP_URL" ]; then
   exit 0
 fi
 
+# pre-signed URL 等の資格情報を以降の public な run ログに出さない。
+# workflow command の data は runner が %25 / %0D / %0A を戻すため、同じ規則で escape して渡す
+mask_value=${APP_ZIP_URL//%/%25}
+mask_value=${mask_value//$'\r'/%0D}
+mask_value=${mask_value//$'\n'/%0A}
+echo "::add-mask::${mask_value}"
+
+# 資格情報が載りうる userinfo・query・fragment を除き、scheme・host・path だけを返す
+url_for_log() {
+  local url=$1 scheme="" rest authority path
+  if [[ "$url" =~ ^[A-Za-z][A-Za-z0-9+.-]*:// ]]; then
+    scheme="${url%%://*}://"
+    rest=${url#*://}
+  else
+    rest=$url
+  fi
+  rest=${rest%%[?#]*}
+  authority=${rest%%/*}
+  path=${rest:${#authority}}
+  printf '%s%s%s\n' "$scheme" "${authority##*@}" "$path"
+}
+
 WORK="${RUNNER_TEMP:-/tmp}/app-install"
 mkdir -p "$WORK"
 
-echo "download: ${APP_ZIP_URL}"
+echo "download: $(url_for_log "$APP_ZIP_URL")"
 curl -fsSL "$APP_ZIP_URL" -o "$WORK/app.zip"
 ditto -x -k "$WORK/app.zip" "$WORK/extracted"
 
