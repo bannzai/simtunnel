@@ -13,9 +13,18 @@ if [ -z "$APP_ZIP_URL" ]; then
   exit 0
 fi
 
-# scheme の無い値は host の位置を決められず、userinfo を除けないままログに出るため拒否する。値自体は出さない
-if [[ ! "$APP_ZIP_URL" =~ ^[A-Za-z][A-Za-z0-9+.-]*:// ]]; then
-  echo "app_zip_url は <scheme>://<host>/<path> の形で指定する" >&2
+# ログには資格情報が載りうる userinfo・query・fragment を除いた scheme・host・path だけを出す。
+# userinfo の / ? # が percent-encode されていない値は host と path の境界を決められず、
+# userinfo の一部がログに出るため拒否する。拒否する時も値自体は出さない
+url_rest=${APP_ZIP_URL#*://}
+url_rest=${url_rest%%[?#]*}
+url_authority=${url_rest%%/*}
+url_host=${url_authority##*@}
+url_path=${url_rest:${#url_authority}}
+if [[ ! "$APP_ZIP_URL" =~ ^[A-Za-z][A-Za-z0-9+.-]*:// ]] ||
+  [[ ! "$url_host" =~ ^([A-Za-z0-9.-]+|\[[0-9A-Fa-f:.]+\])(:[0-9]+)?$ ]] ||
+  [[ "$url_path" == *@* ]]; then
+  echo "app_zip_url は <scheme>://<host>/<path> の形で指定する（userinfo の / ? # @ は percent-encode する）" >&2
   exit 1
 fi
 
@@ -26,20 +35,10 @@ mask_value=${mask_value//$'\r'/%0D}
 mask_value=${mask_value//$'\n'/%0A}
 echo "::add-mask::${mask_value}"
 
-# 資格情報が載りうる userinfo・query・fragment を除き、scheme・host・path だけを返す
-url_for_log() {
-  local url=$1 rest authority path
-  rest=${url#*://}
-  rest=${rest%%[?#]*}
-  authority=${rest%%/*}
-  path=${rest:${#authority}}
-  printf '%s://%s%s\n' "${url%%://*}" "${authority##*@}" "$path"
-}
-
 WORK="${RUNNER_TEMP:-/tmp}/app-install"
 mkdir -p "$WORK"
 
-echo "download: $(url_for_log "$APP_ZIP_URL")"
+echo "download: ${APP_ZIP_URL%%://*}://${url_host}${url_path}"
 curl -fsSL "$APP_ZIP_URL" -o "$WORK/app.zip"
 ditto -x -k "$WORK/app.zip" "$WORK/extracted"
 

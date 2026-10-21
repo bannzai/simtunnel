@@ -74,6 +74,8 @@ Tailscale は無料の Personal プラン（デバイス 100 台）で成立す�
 
 リポジトリは public で運用する。tailnet 内の実 IP 等の環境固有情報は、このリポジトリにも **run のログ・ステップサマリにも**書かない（後者は public リポジトリでは誰でも読める）。接続先は MagicDNS 名（`simtunnel-<session>`）で足りるため、runner 側が IP を出力する必要はない（`session.yml` のセッション情報出力と `bridge.sh` の両方が対象）。
 
+workflow の入力は secret のマスキング対象外で、runner は step の `env:` を値ごと run のログに印字する（step 内の `::add-mask::` は印字済みのこの部分に効かない）。そのため資格情報を含みうる入力（`app_zip_url` の pre-signed URL 等）は、スクリプト側で `::add-mask::` した上で userinfo・query・fragment を除いた形でだけ出力し、利用者には失効の早い URL か `app_artifact` を使うよう README で案内する。
+
 1. **公開エンドポイントゼロ**: WDA / MJPEG は tailnet 内からしか到達できない
 2. **トリガーは `workflow_dispatch` のみ**: 起動できるのは write 権限者だけ。fork からの PR には Secrets / OIDC トークンの権限が渡らない
 3. **長期シークレットを持たない（OIDC / workload identity federation）**: Tailscale への認証は、GitHub が workflow に発行する短命の OIDC トークンで行う。subject がこのリポジトリを指す trust credential の Subject（形式は「Tailscale セットアップ手順」参照）に一致する workflow しか認証できず、盗まれて困る静的シークレットがそもそも存在しない（Secrets の `TS_OIDC_CLIENT_ID` / `TS_OIDC_AUDIENCE` は識別子であり秘密情報ではない）

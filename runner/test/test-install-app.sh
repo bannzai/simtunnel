@@ -89,15 +89,22 @@ run_install 'https://example.com?token=secret'
 assert_output_line 'download: https://example.com'
 assert_log_lines_exclude 'token=secret'
 
-# scheme の無い値は、URL をログに出さず curl も呼ばずに失敗する
+run_install $'https://example.com/App.zip?a=1\r\nb=2'
+[ "$(head -1 "${LOG_DIR}/output")" = '::add-mask::https://example.com/App.zip?a=1%0D%0Ab=2' ] ||
+  fail "改行を含む URL の add-mask が escape されていない"
+assert_output_line 'download: https://example.com/App.zip'
+
+# host と path の境界を決められない値は、URL をログに出さず curl も呼ばずに失敗する
 for invalid_url in \
   'https:/user:pass@example.com/App.zip?sig=abc' \
-  'example.com/App.zip?next=https://evil/?token=secret'; do
+  'example.com/App.zip?next=https://evil/?token=secret' \
+  'https://user:pass?sig=abc@example.com/App.zip' \
+  'https://user:12/pass@example.com/App.zip?sig=abc'; do
   if run_install "$invalid_url"; then
-    fail "scheme の無い ${invalid_url} を受け付けた"
+    fail "形式の不正な ${invalid_url} を受け付けた"
   fi
-  [ ! -e "${LOG_DIR}/curl-args" ] || fail "scheme の無い ${invalid_url} で curl を呼んだ"
-  assert_log_lines_exclude 'user:pass'
+  [ ! -e "${LOG_DIR}/curl-args" ] || fail "形式の不正な ${invalid_url} で curl を呼んだ"
+  assert_log_lines_exclude 'user:'
   assert_log_lines_exclude 'sig=abc'
   assert_log_lines_exclude 'token=secret'
 done
