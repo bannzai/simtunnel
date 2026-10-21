@@ -18,6 +18,11 @@ cat >"${BIN_DIR}/curl" <<'EOF'
 #!/bin/bash
 set -euo pipefail
 printf '%s\n' "$@" >"${TEST_LOG_DIR}/curl-args"
+if [ -n "${TEST_CURL_FAIL:-}" ]; then
+  # 実際の curl が解決エラーに出す host より多く、URL 全体を stderr に出して失敗する
+  echo "curl: (6) Could not resolve host: $*" >&2
+  exit 6
+fi
 while [ "$#" -gt 0 ]; do
   case "$1" in
     -o)
@@ -113,7 +118,22 @@ for url_with_at in \
   assert_log_lines_exclude 'TOKEN'
   assert_log_lines_exclude 'sig=abc'
   grep -qxF -- "$url_with_at" "${LOG_DIR}/curl-args" || fail "curl に元の URL が渡っていない: ${url_with_at}"
+
+  # curl のエラー本文は捨て、終了コードだけを出して同じ終了コードで失敗する
+  status=0
+  TEST_CURL_FAIL=1 run_install "$url_with_at" || status=$?
+  [ "$status" -eq 6 ] || fail "curl 失敗時の終了コードが 6 ではない (${status}): ${url_with_at}"
+  assert_output_line 'download に失敗 (curl exit 6)'
+  assert_log_lines_exclude 'TOKEN'
+  assert_log_lines_exclude 'sig=abc'
 done
+
+# 除くものが無い URL はマスクしない (マスクすると download の行が *** になる)
+run_install 'https://example.com/App.zip'
+assert_output_line 'download: https://example.com/App.zip'
+if grep -q '^::add-mask::' "${LOG_DIR}/output"; then
+  fail "除くものが無い URL をマスクした"
+fi
 
 # scheme の無い値は、URL をログに出さず curl も呼ばずに失敗する
 for invalid_url in \
