@@ -13,6 +13,12 @@ if [ -z "$APP_ZIP_URL" ]; then
   exit 0
 fi
 
+# scheme の無い値は host の位置を決められず、userinfo を除けないままログに出るため拒否する。値自体は出さない
+if [[ ! "$APP_ZIP_URL" =~ ^[A-Za-z][A-Za-z0-9+.-]*:// ]]; then
+  echo "app_zip_url は <scheme>://<host>/<path> の形で指定する" >&2
+  exit 1
+fi
+
 # pre-signed URL 等の資格情報を以降の public な run ログに出さない。
 # workflow command の data は runner が %25 / %0D / %0A を戻すため、同じ規則で escape して渡す
 mask_value=${APP_ZIP_URL//%/%25}
@@ -22,17 +28,12 @@ echo "::add-mask::${mask_value}"
 
 # 資格情報が載りうる userinfo・query・fragment を除き、scheme・host・path だけを返す
 url_for_log() {
-  local url=$1 scheme="" rest authority path
-  if [[ "$url" =~ ^[A-Za-z][A-Za-z0-9+.-]*:// ]]; then
-    scheme="${url%%://*}://"
-    rest=${url#*://}
-  else
-    rest=$url
-  fi
+  local url=$1 rest authority path
+  rest=${url#*://}
   rest=${rest%%[?#]*}
   authority=${rest%%/*}
   path=${rest:${#authority}}
-  printf '%s%s%s\n' "$scheme" "${authority##*@}" "$path"
+  printf '%s://%s%s\n' "${url%%://*}" "${authority##*@}" "$path"
 }
 
 WORK="${RUNNER_TEMP:-/tmp}/app-install"

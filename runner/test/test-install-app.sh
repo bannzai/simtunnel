@@ -89,9 +89,17 @@ run_install 'https://example.com?token=secret'
 assert_output_line 'download: https://example.com'
 assert_log_lines_exclude 'token=secret'
 
-# scheme の無い値で、query 内の "://" を scheme と取り違えない
-run_install 'example.com/App.zip?next=https://evil/?token=secret'
-assert_output_line 'download: example.com/App.zip'
-assert_log_lines_exclude 'token=secret'
+# scheme の無い値は、URL をログに出さず curl も呼ばずに失敗する
+for invalid_url in \
+  'https:/user:pass@example.com/App.zip?sig=abc' \
+  'example.com/App.zip?next=https://evil/?token=secret'; do
+  if run_install "$invalid_url"; then
+    fail "scheme の無い ${invalid_url} を受け付けた"
+  fi
+  [ ! -e "${LOG_DIR}/curl-args" ] || fail "scheme の無い ${invalid_url} で curl を呼んだ"
+  assert_log_lines_exclude 'user:pass'
+  assert_log_lines_exclude 'sig=abc'
+  assert_log_lines_exclude 'token=secret'
+done
 
 echo "test-install-app: PASS"
