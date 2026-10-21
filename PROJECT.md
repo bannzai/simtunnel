@@ -175,7 +175,7 @@ WDA では届かない領域（起動引数を要する状態の作り込み、�
 - `push` の payload は `aps` オブジェクト必須・入れ子 6 段まで・JSON の基本型のみ。宛先の決定をサーバ側に一本化するため、`Simulator Target Bundle` を含む payload は拒否する
 - `simctl spawn` / `openurl` / `keychain` / `addmedia` など、**シミュレータ内での任意実行やホストのファイル参照につながる動詞は追加しない**
 - 呼び出しの監査ログは runner ローカル（`$RUNNER_TEMP/agentd-audit.log`）にだけ記録する。HTTP サーバの既定のアクセスログも stderr ではなくこのファイルへ流し、public repo の run ログ・ステップサマリに値を出さない
-- **ブラウザからの要求（CSRF）を受けない**。tailnet メンバーが開いた Web ページは、そのメンバーのブラウザから `:8200` に到達できてしまうため、POST には `Content-Type: application/json`（無い・違えば 415）と、セッションごとのトークンの `X-Simtunnel-Token` ヘッダー（無い・違えば 401）を必須にし、`Origin` ヘッダー付きの要求は 403 で拒否する（CLI と MCP クライアントは `Origin` を送らない）。トークンは agentd が起動時に作ってメモリにだけ持ち、`GET /token` で渡す。クロスオリジンのページは CORS に応じない応答を読めず、DNS rebinding で同一オリジンになったページは Host 名で弾く（`GET /token` は Host が IP・`localhost`・`simtunnel-<session>`（とその `*.ts.net` の FQDN）の時だけ応じる）。トークンは run ログ・ステップサマリにも監査ログにも書かない。これは「到達できないこと」を前提にした上での CSRF 対策で、認証で公開エンドポイントにする方向（「機能追加でこの前提を崩さないための判断基準」）とは別物
+- **ブラウザからの要求（CSRF）を受けない**。tailnet メンバーが開いた Web ページは、そのメンバーのブラウザから `:8200` に到達できてしまうため、POST には `Content-Type: application/json`（無い・違えば 415）と、セッションごとのトークンの `X-Simtunnel-Token` ヘッダー（無い・違えば 401）を必須にし、`Origin` ヘッダー付きの POST と `GET /token` は 403 で拒否する（CLI と MCP クライアントは `Origin` を送らない）。トークンは agentd が起動時に作ってメモリにだけ持ち、`GET /token` で渡す。クロスオリジンのページは CORS に応じない応答を読めず、DNS rebinding で同一オリジンになったページは Host 名で弾く（`GET /token` は Host が IP・`localhost`・`simtunnel-<session>`（とその `*.ts.net` の FQDN）の時だけ応じる）。トークンは run ログ・ステップサマリにも監査ログにも書かない。これは「到達できないこと」を前提にした上での CSRF 対策で、認証で公開エンドポイントにする方向（「機能追加でこの前提を崩さないための判断基準」）とは別物
 - **録画ファイルを転送するエンドポイントは持たない**。`record/stop` は runner 上のパスとサイズを返すだけにする。DERP relay 経由（実測 約 60KB/s）では動画の取り出しが現実的な時間で終わらず、ローカル側の録画は `simtunnel record` で足りるため
 - **runner 側の録画は 1 slot につき 1 本・最長 10 分・停止済みの保持は直近 5 本**。`record/start` は同じ slot の実行中の録画を止めてから始め、止め忘れた録画もサーバ側の watchdog が打ち切る。応答が届かず `recordingId` を受け取れなかったクライアントは録画を止められず、放っておくとジョブが終わるまで書き続けて runner のディスクを圧迫するため。停止済みの録画も 5 本を超えた分は古いものから動画とログを消す（1 本 10 分の上限だけでは、録画を繰り返すと本数の累積で runner のディスクを使い切る。転送エンドポイントを持たない以上、残す意味があるのは同じセッション中に確認できる直近の数本だけ）
 
@@ -577,7 +577,7 @@ simtunnel/
 │   ├── bridge.sh                     # socat: tailscale IF → 指定ポート（直接到達可能ならスキップ）
 │   └── keepalive.sh                  # duration_minutes までジョブを維持（WDA 死活監視付き）
 ├── local/
-│   └── simtunnel                     # ローカル CLI: up / down / list / status / screenshot / record / preview / wait
+│   └── simtunnel                     # ローカル CLI: up / down / list / status / screenshot / record / preview / wait / mcp-config / agentd
 └── mcp/                              # simtunnel-mcp（index.mjs。SIMTUNNEL_WDA_URL で接続先指定）
 ```
 

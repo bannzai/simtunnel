@@ -147,7 +147,7 @@ WebDriverAgent has no authentication. Reaching it means fully controlling the si
 - `tag:ci` cannot initiate connections to anything in the tailnet.
 - Ephemeral nodes. Runners leave the tailnet when the job ends.
 - agentd accepts fixed verbs with schema-validated arguments. It never runs a command string, script, or file path sent by a client.
-- agentd rejects requests a browser can send cross-origin: a POST needs `Content-Type: application/json` and the per-session `X-Simtunnel-Token` header, and any request with an `Origin` header is refused. This stops a web page opened by a tailnet member from driving agentd. It is not a substitute for keeping agentd unreachable from outside the tailnet.
+- agentd rejects requests a browser can send cross-origin: a POST needs `Content-Type: application/json` and the per-session `X-Simtunnel-Token` header, and a POST or `GET /token` with an `Origin` header is refused. This stops a web page opened by a tailnet member from driving agentd. It is not a substitute for keeping agentd unreachable from outside the tailnet.
 - Third-party actions are pinned to full commit SHAs. Runner scripts are checked out at the same SHA as the reusable workflow.
 
 ## Limits and GitHub's terms
