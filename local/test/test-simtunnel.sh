@@ -15,6 +15,7 @@ session_ready="${test_dir}/session-ready"
 # --status in_progress の時は createdAt だけ、それ以外は前の 4 列を返す）と、tailscale status --json の出力
 runs_file="${test_dir}/runs.tsv"
 peers_file="${test_dir}/peers.json"
+real_git=$(command -v git)
 mkdir -p "$bin_dir"
 : >"$gh_log"
 
@@ -39,6 +40,10 @@ set -euo pipefail
 if [ "${1:-}" = "ls-remote" ]; then
   printf '0123456789abcdef0123456789abcdef01234567\trefs/heads/feature\n'
   exit 0
+fi
+# mcp-config が .mcp.json の ignore 状態を調べる呼び出しは実物の git で答える
+if [ "${1:-}" = "-C" ]; then
+  exec "$REAL_GIT" "$@"
 fi
 exit 1
 EOF
@@ -68,6 +73,7 @@ chmod +x "${bin_dir}/gh" "${bin_dir}/git" "${bin_dir}/tailscale" "${bin_dir}/cur
 
 run_simtunnel() {
   PATH="${bin_dir}:$PATH" \
+    REAL_GIT="$real_git" \
     GH_LOG="$gh_log" \
     CURL_LOG="$curl_log" \
     SESSION_READY="$session_ready" \
@@ -246,3 +252,21 @@ fi
 }
 
 echo "PASS: mcp-config の接続先"
+
+write_runner_peer
+finish_peers
+unignored_repo="${test_dir}/unignored-repo"
+mkdir -p "$unignored_repo"
+# test_dir は simtunnel リポジトリの ignore 済みの tmp/ 配下のため、独立した git リポジトリを作る
+"$real_git" init -q "$unignored_repo"
+if run_simtunnel mcp-config sample "$unignored_repo" >/dev/null 2>&1; then
+  echo ".mcp.json が ignore されていないリポジトリで mcp-config が成功した" >&2
+  exit 1
+fi
+[ ! -e "${unignored_repo}/.mcp.json" ] || { echo "ignore されていない .mcp.json に実 IP を書いた" >&2; exit 1; }
+
+printf '.mcp.json\n' >>"${unignored_repo}/.git/info/exclude"
+run_simtunnel mcp-config sample "$unignored_repo" >/dev/null
+[ -f "${unignored_repo}/.mcp.json" ] || { echo "ignore 済みの .mcp.json を書かなかった" >&2; exit 1; }
+
+echo "PASS: mcp-config は ignore されていない .mcp.json に書かない"

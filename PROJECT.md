@@ -611,7 +611,7 @@ worktree のプロジェクトルートに `.mcp.json` を置く:
 <simtunnel リポジトリの絶対パス>/local/simtunnel mcp-config <session> [worktree のパス] [--name mobile]
 ```
 
-生成ヘルパーは `SIMTUNNEL_WDA_URL` に MagicDNS 名ではなく、検証済みのノードの IP を書く。ホスト名 `simtunnel-<session>` は tailnet の任意のノードが名乗れる値のため、`local/simtunnel` は接続先（status / screenshot / record / preview / wait / mcp-config）を次の 3 つを満たすノードに限る: MagicDNS 名が `simtunnel-<session>` で online、`tailscale status --json` の Tags に `tag:ci` がある（OIDC で参加した runner だけが持つ）、対象 repo で実行中の `session=<session>` の run（run id で特定）の作成時刻より後に作成されたノード（tailscale のノード情報に run id は載らないため作成時刻で照合する。先に同名で登録しておいたノードを除く）。IP はセッションごとに変わるため、`up` し直したら `mcp-config` も実行し直す。
+生成ヘルパーは `SIMTUNNEL_WDA_URL` に MagicDNS 名ではなく、検証済みのノードの IP を書く。ホスト名 `simtunnel-<session>` は tailnet の任意のノードが名乗れる値のため、`local/simtunnel` は接続先（status / screenshot / record / preview / wait / mcp-config）を次の 3 つを満たすノードに限る: MagicDNS 名が `simtunnel-<session>` で online、`tailscale status --json` の Tags に `tag:ci` がある（OIDC で参加した runner だけが持つ）、対象 repo で実行中の `session=<session>` の run（run id で特定）の作成時刻より後に作成されたノード（tailscale のノード情報に run id は載らないため作成時刻で照合する。先に同名で登録しておいたノードを除く）。IP はセッションごとに変わるため、`up` し直したら `mcp-config` も実行し直す。tailnet の実 IP をリポジトリに入れないため、書き出し先が git 管理下で `.mcp.json` が ignore されていない（`.gitignore` / `.git/info/exclude` に無い、または追跡済み）時は書かずに失敗する。
 
 ### mobile-mcp 互換ツール
 

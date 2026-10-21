@@ -568,6 +568,12 @@ cmd_mcp_config() {
   validate_slot "$slot" || return 1
   ensure_session_ip_prerequisites || return 1
   [ -d "$dir" ] || { echo "ディレクトリが存在しない: $dir" >&2; return 1; }
+  # .mcp.json には tailnet の実 IP を書くため、git 管理下では ignore されている時だけ書く（追跡済みのファイルは ignore されない扱いになる）
+  if git -C "$dir" rev-parse --is-inside-work-tree >/dev/null 2>&1 \
+    && ! git -C "$dir" check-ignore -q .mcp.json; then
+    echo "${dir}/.mcp.json が git で ignore されていない。tailnet の実 IP を書くため、.gitignore か .git/info/exclude に .mcp.json を足してから再実行して" >&2
+    return 1
+  fi
   # MagicDNS 名はホスト名を名乗ったノードへ解決されるため、URL は session_ip で検証したノードの IP にする
   local ip
   ip=$(session_ip "$session")
