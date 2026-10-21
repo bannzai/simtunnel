@@ -13,11 +13,46 @@ if [ -z "$APP_ZIP_URL" ]; then
   exit 0
 fi
 
+# scheme の無い値は host の位置を決められず、userinfo を除けないままログに出るため拒否する。値自体は出さない
+if [[ ! "$APP_ZIP_URL" =~ ^[A-Za-z][A-Za-z0-9+.-]*:// ]]; then
+  echo "app_zip_url は <scheme>://<host>/<path> の形で指定する" >&2
+  exit 1
+fi
+
+# ログには資格情報が載りうる userinfo・query・fragment を除いた scheme・host・path だけを出す。
+# @ がある値は、userinfo に未エンコードの / ? # が混じると userinfo と host・path の境界を決められないため、scheme だけを出す
+url_rest=${APP_ZIP_URL#*://}
+if [[ "$url_rest" == *@* ]]; then
+  url_for_log="${APP_ZIP_URL%%://*}://(host と path は省略)"
+else
+  url_for_log="${APP_ZIP_URL%%://*}://${url_rest%%[?#]*}"
+fi
+
+# pre-signed URL 等の資格情報を以降の public な run ログに出さない。
+# 除くものが無い URL までマスクすると download の行が *** になるため、ログ用の形と異なる時だけマスクする。
+# workflow command の data は runner が %25 / %0D / %0A を戻すため、同じ規則で escape して渡す
+if [ "$url_for_log" != "$APP_ZIP_URL" ]; then
+  mask_value=${APP_ZIP_URL//%/%25}
+  mask_value=${mask_value//$'\r'/%0D}
+  mask_value=${mask_value//$'\n'/%0A}
+  echo "::add-mask::${mask_value}"
+fi
+
 WORK="${RUNNER_TEMP:-/tmp}/app-install"
 mkdir -p "$WORK"
 
-echo "download: ${APP_ZIP_URL}"
-curl -fsSL "$APP_ZIP_URL" -o "$WORK/app.zip"
+echo "download: ${url_for_log}"
+if [[ "$url_rest" == *@* ]]; then
+  # curl は authority を最初の / ? # で区切るため、userinfo の一部を host として解決エラー
+  # (Could not resolve host: ...) に出しうる。エラー本文は捨て、終了コードだけを出す
+  curl -fsSL "$APP_ZIP_URL" -o "$WORK/app.zip" 2>/dev/null || {
+    rc=$?
+    echo "download に失敗 (curl exit ${rc})" >&2
+    exit "$rc"
+  }
+else
+  curl -fsSL "$APP_ZIP_URL" -o "$WORK/app.zip"
+fi
 ditto -x -k "$WORK/app.zip" "$WORK/extracted"
 
 APP_PATH=$(find "$WORK/extracted" -maxdepth 3 -name "*.app" -type d | head -1)
