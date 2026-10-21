@@ -578,10 +578,12 @@ cmd_agentd() {
     return 1
   }
   # record/start は録画の開始まで最大 20 秒、simctl は 1 回 60 秒まで待つため、DERP 経由の遅延を含めて 120 秒
+  local status=0
   printf 'X-Simtunnel-Token: %s\n' "$token" \
     | curl -sS --fail-with-body -m 120 -X POST "http://${ip}:8200/v1/${verb}" \
-        -H 'Content-Type: application/json' -H @- -d "$body"
+        -H 'Content-Type: application/json' -H @- -d "$body" || status=$?
   echo
+  return "$status"
 }
 
 # serve-sim の preview UI をブラウザで開く。
