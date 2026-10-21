@@ -11,7 +11,8 @@ bin_dir="${test_dir}/bin"
 gh_log="${test_dir}/gh.log"
 curl_log="${test_dir}/curl.log"
 session_ready="${test_dir}/session-ready"
-# gh run list が返す run（session_runs の --jq 適用後の TSV）と、tailscale status --json の出力
+# gh run list が返す run（runID / status / headBranch / headSha / createdAt の TSV。
+# --status in_progress の時は createdAt だけ、それ以外は前の 4 列を返す）と、tailscale status --json の出力
 runs_file="${test_dir}/runs.tsv"
 peers_file="${test_dir}/peers.json"
 mkdir -p "$bin_dir"
@@ -25,7 +26,10 @@ if [ "${1:-}" = "workflow" ] && [ "${2:-}" = "run" ]; then
   : >"$SESSION_READY"
 fi
 if [ "${1:-}" = "run" ] && [ "${2:-}" = "list" ] && [ -f "$SESSION_READY" ]; then
-  cat "$RUNS_FILE"
+  case " $* " in
+    *" --status in_progress "*) cut -f5 "$RUNS_FILE" ;;
+    *) cut -f1-4 "$RUNS_FILE" ;;
+  esac
 fi
 EOF
 

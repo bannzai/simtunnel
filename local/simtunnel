@@ -76,7 +76,7 @@ ts_bin() {
 
 # $REPO で実行中の session の run が起動した simtunnel-<session> の IPv4 を返す（検証できるノードが無ければ空）。
 # ホスト名は任意の tailnet ノードが名乗れる値で身元の確認に使えないため、OIDC で参加した runner だけが持つ
-# tag:ci と、session_runs が返す run の作成後に参加したノードであることを確かめる。
+# tag:ci と、in_progress の run の作成後に参加したノードであることを確かめる。
 # tailscale のノード情報には run id が載らないため、run id で特定した run とはノードの作成時刻で照合する
 # （先に同名で登録しておいたノードは、run より前に作成されているので採用しない）。
 # 終了済みセッションの node が offline のまま一覧に残ることがあるため、offline の peer は対象にしない。
@@ -85,7 +85,7 @@ session_ip() {
   local session=$1
   "$(ts_bin)" status --json 2>/dev/null | jq -r \
     --arg host "simtunnel-${session}" \
-    --arg run_created "$(session_runs "$session" | cut -f5)" \
+    --arg run_created "$(session_in_progress_run_created "$session")" \
     '($run_created | split("\n") | map(select(. != ""))) as $runs
      | [.Peer[]?
         | select(((.DNSName // "") | split(".")[0]) == $host)
@@ -101,12 +101,22 @@ ensure_session_ip_prerequisites() {
   [ -n "$REPO" ] || ensure_repo
 }
 
-# session 名に一致する実行中/待機中の run を "runID<TAB>status<TAB>headBranch<TAB>headSha<TAB>createdAt" で列挙する
+# session 名に一致する実行中/待機中の run を "runID<TAB>status<TAB>headBranch<TAB>headSha" で列挙する
 session_runs() {
   local session=$1
   gh run list -R "$REPO" --workflow "$WORKFLOW" -L 50 \
-    --json databaseId,displayTitle,status,headBranch,headSha,createdAt \
-    --jq ".[] | select(.status != \"completed\") | select(.displayTitle | startswith(\"session=${session} \")) | [.databaseId, .status, .headBranch, .headSha, .createdAt] | @tsv"
+    --json databaseId,displayTitle,status,headBranch,headSha \
+    --jq ".[] | select(.status != \"completed\") | select(.displayTitle | startswith(\"session=${session} \")) | [.databaseId, .status, .headBranch, .headSha] | @tsv"
+}
+
+# session 名に一致する in_progress の run の作成時刻を 1 行ずつ返す。
+# ノードは run の job が動いている間だけ参加するため in_progress に絞り、完了済みの後続 run で
+# 稼働中の run が -L の件数から押し出されないようにする
+session_in_progress_run_created() {
+  local session=$1
+  gh run list -R "$REPO" --workflow "$WORKFLOW" --status in_progress -L 50 \
+    --json displayTitle,createdAt \
+    --jq ".[] | select(.displayTitle | startswith(\"session=${session} \")) | .createdAt"
 }
 
 # simtunnel-<session> を名乗る online の node が tailnet にあるか（身元は確かめない）。
@@ -239,8 +249,8 @@ cmd_up() {
       return 1
     fi
     # 既存セッションがどのコミットで動いているかを常に表示し、古いバイナリの取り違えに気付けるようにする
-    local id status branch sha _created
-    while IFS=$'\t' read -r id status branch sha _created; do
+    local id status branch sha
+    while IFS=$'\t' read -r id status branch sha; do
       echo "既存セッション ${session}: run ${id} (${status} branch=${branch} commit=${sha:0:7})"
     done <<<"$runs"
 
