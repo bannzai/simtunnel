@@ -13,24 +13,19 @@ if [ -z "$APP_ZIP_URL" ]; then
   exit 0
 fi
 
-# ログには資格情報が載りうる userinfo・query・fragment を除いた scheme・host・path だけを出す。
-# userinfo の ? # が percent-encode されていない値は host を決められず、userinfo の一部がログに出るため拒否する。
-# 拒否する時も値自体は出さない
-url_rest=${APP_ZIP_URL#*://}
-url_rest=${url_rest%%[?#]*}
-url_authority=${url_rest%%/*}
-url_host=${url_authority##*@}
-url_path=${url_rest:${#url_authority}}
-if [[ ! "$APP_ZIP_URL" =~ ^[A-Za-z][A-Za-z0-9+.-]*:// ]] ||
-  [[ ! "$url_host" =~ ^([A-Za-z0-9.-]+|\[[0-9A-Fa-f:.]+\])(:[0-9]+)?$ ]]; then
-  echo "app_zip_url は <scheme>://<host>/<path> の形で指定する（userinfo の / ? # @ は percent-encode する）" >&2
+# scheme の無い値は host の位置を決められず、userinfo を除けないままログに出るため拒否する。値自体は出さない
+if [[ ! "$APP_ZIP_URL" =~ ^[A-Za-z][A-Za-z0-9+.-]*:// ]]; then
+  echo "app_zip_url は <scheme>://<host>/<path> の形で指定する" >&2
   exit 1
 fi
-url_for_log="${APP_ZIP_URL%%://*}://${url_host}${url_path}"
-# path の @ は正当だが、userinfo に未エンコードの / がある値 (user:12/pass@host) と見分けられない。
-# その場合 host・path が userinfo の一部になりうるため、scheme だけを出す
-if [[ "$url_path" == *@* ]]; then
+
+# ログには資格情報が載りうる userinfo・query・fragment を除いた scheme・host・path だけを出す。
+# @ がある値は、userinfo に未エンコードの / ? # が混じると userinfo と host・path の境界を決められないため、scheme だけを出す
+url_rest=${APP_ZIP_URL#*://}
+if [[ "$url_rest" == *@* ]]; then
   url_for_log="${APP_ZIP_URL%%://*}://(host と path は省略)"
+else
+  url_for_log="${APP_ZIP_URL%%://*}://${url_rest%%[?#]*}"
 fi
 
 # pre-signed URL 等の資格情報を以降の public な run ログに出さない。

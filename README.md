@@ -86,7 +86,7 @@ Apps that need a custom build (Flutter, secret restoration, SDK setup) build in 
 
 `app_zip_url` is a plain workflow input, so GitHub does not treat it as a secret. Before passing a URL that carries credentials (a pre-signed URL, a token in the query, `user:pass@`), note that the run logs of a public repository are public:
 
-- `install-app.sh` masks the URL with `::add-mask::` and prints only the scheme, host, and path. It rejects a URL whose host cannot be located (for example, userinfo with an unencoded `?` or `#`), and prints only the scheme when the path contains `@`. This covers the script's output, not the step's `env:` block, which the runner prints in full before the script starts.
+- `install-app.sh` masks the URL with `::add-mask::` and prints only the scheme, host, and path. When the URL contains `@` anywhere, it prints only the scheme, because unencoded `/`, `?`, or `#` in userinfo make the host boundary ambiguous. This covers the script's output, not the step's `env:` block, which the runner prints in full before the script starts.
 - Use a URL that expires within the session, or use `app_artifact`, which never puts a URL in the log.
 <!-- source: measured on run 33455363685 of this repository: the header of the "アプリを install / launch" step lists `APP_ZIP_URL:` under `env:` before the script output. -->
 

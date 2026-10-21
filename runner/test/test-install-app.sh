@@ -75,13 +75,12 @@ assert_output_line() {
   grep -qxF -- "$1" "${LOG_DIR}/output" || fail "出力に「$1」の行が無い"
 }
 
-URL='https://user:pass@example.com/bucket/App.zip?X-Amz-Signature=abc%2Fdef&X-Amz-Credential=key#frag'
+URL='https://example.com/bucket/App.zip?X-Amz-Signature=abc%2Fdef&X-Amz-Credential=key#frag'
 run_install "$URL"
-[ "$(head -1 "${LOG_DIR}/output")" = '::add-mask::https://user:pass@example.com/bucket/App.zip?X-Amz-Signature=abc%252Fdef&X-Amz-Credential=key#frag' ] ||
+[ "$(head -1 "${LOG_DIR}/output")" = '::add-mask::https://example.com/bucket/App.zip?X-Amz-Signature=abc%252Fdef&X-Amz-Credential=key#frag' ] ||
   fail "最初の行が URL の add-mask ではない"
 assert_output_line 'download: https://example.com/bucket/App.zip'
 assert_log_lines_exclude 'X-Amz-Signature'
-assert_log_lines_exclude 'user:pass'
 assert_log_lines_exclude '#frag'
 grep -qxF -- "$URL" "${LOG_DIR}/curl-args" || fail "curl に元の URL が渡っていない"
 
@@ -89,29 +88,41 @@ run_install 'https://example.com?token=secret'
 assert_output_line 'download: https://example.com'
 assert_log_lines_exclude 'token=secret'
 
+# host の文字種・空の port は絞らない
+run_install 'https://my_bucket.example.com:/App.zip?sig=abc'
+assert_output_line 'download: https://my_bucket.example.com:/App.zip'
+assert_log_lines_exclude 'sig=abc'
+
 run_install $'https://example.com/App.zip?a=1\r\nb=2'
 [ "$(head -1 "${LOG_DIR}/output")" = '::add-mask::https://example.com/App.zip?a=1%0D%0Ab=2' ] ||
   fail "改行を含む URL の add-mask が escape されていない"
 assert_output_line 'download: https://example.com/App.zip'
 
-# path の @ は受け付けるが、userinfo の未エンコードの / と見分けられないため host・path を出さない
-run_install 'https://example.com/builds/App@2.zip?sig=abc'
-assert_output_line 'download: https://(host と path は省略)'
-assert_log_lines_exclude 'sig=abc'
-run_install 'https://user:12/pass@example.com/App.zip?sig=abc'
-assert_output_line 'download: https://(host と path は省略)'
-assert_log_lines_exclude 'user:'
-assert_log_lines_exclude 'sig=abc'
+# @ がある値は受け付けるが、userinfo と host・path の境界を決められないため scheme だけを出す
+for url_with_at in \
+  'https://user:pass@example.com/bucket/App.zip?sig=abc#frag' \
+  'https://example.com/builds/App@2.zip?sig=abc' \
+  'https://user:12/pass@example.com/App.zip?sig=abc' \
+  'https://deploy:1234?sig=abc@example.com/App.zip' \
+  'https://user:12/pass?sig=abc@example.com/App.zip' \
+  'https://TOKEN#sig=abc@example.com/App.zip'; do
+  run_install "$url_with_at"
+  assert_output_line 'download: https://(host と path は省略)'
+  assert_log_lines_exclude 'user:'
+  assert_log_lines_exclude 'deploy:'
+  assert_log_lines_exclude 'TOKEN'
+  assert_log_lines_exclude 'sig=abc'
+  grep -qxF -- "$url_with_at" "${LOG_DIR}/curl-args" || fail "curl に元の URL が渡っていない: ${url_with_at}"
+done
 
-# host を決められない値は、URL をログに出さず curl も呼ばずに失敗する
+# scheme の無い値は、URL をログに出さず curl も呼ばずに失敗する
 for invalid_url in \
   'https:/user:pass@example.com/App.zip?sig=abc' \
-  'example.com/App.zip?next=https://evil/?token=secret' \
-  'https://user:pass?sig=abc@example.com/App.zip'; do
+  'example.com/App.zip?next=https://evil/?token=secret'; do
   if run_install "$invalid_url"; then
-    fail "形式の不正な ${invalid_url} を受け付けた"
+    fail "scheme の無い ${invalid_url} を受け付けた"
   fi
-  [ ! -e "${LOG_DIR}/curl-args" ] || fail "形式の不正な ${invalid_url} で curl を呼んだ"
+  [ ! -e "${LOG_DIR}/curl-args" ] || fail "scheme の無い ${invalid_url} で curl を呼んだ"
   assert_log_lines_exclude 'user:'
   assert_log_lines_exclude 'sig=abc'
   assert_log_lines_exclude 'token=secret'
