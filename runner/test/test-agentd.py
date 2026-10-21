@@ -98,11 +98,30 @@ class AgentdTestCase(unittest.TestCase):
     def setUp(self):
         open(self.argv_log, "w", encoding="utf-8").close()
 
-    def post(self, path, body):
+    def auth_headers(self):
+        """CLI と同じく、POST が通るのに必要なヘッダー（Content-Type とトークン）"""
+        return {"Content-Type": "application/json", agentd_module.TOKEN_HEADER: self.server.agentd.token}
+
+    def put_auth_headers(self, connection):
+        """http.client で組み立てる要求に auth_headers を付ける"""
+        for name, value in self.auth_headers().items():
+            connection.putheader(name, value)
+
+    def get_token(self, headers):
+        """GET /token を送り、(HTTP ステータス, 応答 JSON) を返す"""
+        connection = http.client.HTTPConnection("127.0.0.1", self.server.server_address[1], timeout=10)
+        try:
+            connection.request("GET", "/token", headers=headers)
+            response = connection.getresponse()
+            return response.status, json.loads(response.read().decode("utf-8"))
+        finally:
+            connection.close()
+
+    def post(self, path, body, headers=None):
         request = urllib.request.Request(
             self.base_url + path,
             data=json.dumps(body).encode("utf-8"),
-            headers={"Content-Type": "application/json"},
+            headers=self.auth_headers() if headers is None else headers,
             method="POST",
         )
         try:
@@ -272,6 +291,78 @@ class AgentdTestCase(unittest.TestCase):
             del os.environ["XCRUN_RECORD_FAIL"]
         self.assertEqual(status, 500, body)
 
+    # --- ブラウザからの要求（CSRF）が拒否されること ----------------------
+    def test_post_without_json_content_type_is_rejected(self):
+        # text/plain はブラウザが preflight なしでクロスオリジンに送れる
+        for content_type in ("text/plain", "application/x-www-form-urlencoded", "multipart/form-data; boundary=x", None):
+            headers = self.auth_headers()
+            if content_type is None:
+                del headers["Content-Type"]
+            else:
+                headers["Content-Type"] = content_type
+            status, _ = self.post("/v1/privacy", {"action": "grant", "service": "photos"}, headers=headers)
+            self.assertEqual(status, 415, content_type)
+        self.assertEqual(self.simctl_calls(), [])
+
+    def test_post_with_charset_parameter_is_accepted(self):
+        headers = {**self.auth_headers(), "Content-Type": "application/json; charset=utf-8"}
+        status, body = self.post("/v1/privacy", {"action": "grant", "service": "photos"}, headers=headers)
+        self.assertEqual(status, 200, body)
+
+    def test_post_with_origin_is_rejected(self):
+        # 正しいトークンを持っていても、ブラウザが送った要求は通さない
+        for origin in ("https://attacker.example", "null", f"http://127.0.0.1:{self.server.server_address[1]}"):
+            headers = {**self.auth_headers(), "Origin": origin}
+            status, _ = self.post("/v1/privacy", {"action": "grant", "service": "photos"}, headers=headers)
+            self.assertEqual(status, 403, origin)
+        self.assertEqual(self.simctl_calls(), [])
+
+    def test_post_without_valid_token_is_rejected(self):
+        for token in (None, "", "wrong-token", self.server.agentd.token + "x"):
+            headers = self.auth_headers()
+            if token is None:
+                del headers[agentd_module.TOKEN_HEADER]
+            else:
+                headers[agentd_module.TOKEN_HEADER] = token
+            status, _ = self.post("/v1/privacy", {"action": "grant", "service": "photos"}, headers=headers)
+            self.assertEqual(status, 401, token)
+        self.assertEqual(self.simctl_calls(), [])
+
+    def test_unknown_verb_without_token_is_rejected_before_lookup(self):
+        # 認可前に動詞の有無を答えない
+        headers = {"Content-Type": "application/json"}
+        status, _ = self.post("/v1/spawn", {}, headers=headers)
+        self.assertEqual(status, 401)
+
+    def test_token_is_served_to_cli_hosts(self):
+        port = self.server.server_address[1]
+        for host in (f"127.0.0.1:{port}", f"100.64.0.1:{port}", f"[fd7a:115c:a1e0::1]:{port}",
+                     f"localhost:{port}", f"simtunnel-dev:{port}", f"simtunnel-dev.tail1234.ts.net:{port}"):
+            status, body = self.get_token({"Host": host})
+            self.assertEqual(status, 200, host)
+            self.assertEqual(body["token"], self.server.agentd.token, host)
+
+    def test_token_is_not_served_to_browsers(self):
+        port = self.server.server_address[1]
+        cases = [
+            # クロスオリジンの fetch
+            {"Host": f"127.0.0.1:{port}", "Origin": "https://attacker.example"},
+            # DNS rebinding で attacker のドメイン名のまま agentd に届いた要求
+            {"Host": f"attacker.example:{port}"},
+            {"Host": f"simtunnel-dev.attacker.example:{port}"},
+            {"Host": ""},
+        ]
+        for headers in cases:
+            status, body = self.get_token(headers)
+            self.assertEqual(status, 403, headers)
+            self.assertNotIn("token", body, headers)
+
+    def test_token_is_not_written_to_audit_log(self):
+        self.get_token({"Host": "127.0.0.1"})
+        self.post("/v1/privacy", {"action": "grant", "service": "photos"})
+        with open(os.path.join(self.work_dir, "agentd-audit.log"), encoding="utf-8") as f:
+            self.assertNotIn(self.server.agentd.token, f.read())
+
     # --- 許可外・不正入力が 4xx で拒否されること ------------------------
     def test_unknown_verb_is_rejected(self):
         for path in ("/v1/spawn", "/v1/openurl", "/v1/keychain", "/v1/addmedia"):
@@ -329,7 +420,7 @@ class AgentdTestCase(unittest.TestCase):
         # Python の json.loads は NaN / Infinity を受け付けるが JSON の仕様外で、simctl に渡す payload も壊れる
         for raw in (b'{"payload": {"aps": {"badge": NaN}}}', b'{"payload": {"aps": {"badge": Infinity}}}', b'{"slot": -Infinity}'):
             request = urllib.request.Request(
-                self.base_url + "/v1/push", data=raw, headers={"Content-Type": "application/json"}, method="POST",
+                self.base_url + "/v1/push", data=raw, headers=self.auth_headers(), method="POST",
             )
             with self.assertRaises(urllib.error.HTTPError) as raised:
                 urllib.request.urlopen(request, timeout=10)
@@ -375,6 +466,7 @@ class AgentdTestCase(unittest.TestCase):
         request = urllib.request.Request(
             self.base_url + "/v1/push",
             data=b"x" * (agentd_module.MAX_BODY_BYTES + 1),
+            headers=self.auth_headers(),
             method="POST",
         )
         with self.assertRaises(urllib.error.HTTPError) as caught:
@@ -382,7 +474,9 @@ class AgentdTestCase(unittest.TestCase):
         with caught.exception:
             self.assertEqual(caught.exception.code, 413)
 
-        request = urllib.request.Request(self.base_url + "/v1/push", data=b"{not json", method="POST")
+        request = urllib.request.Request(
+            self.base_url + "/v1/push", data=b"{not json", headers=self.auth_headers(), method="POST",
+        )
         with self.assertRaises(urllib.error.HTTPError) as caught:
             urllib.request.urlopen(request, timeout=10)
         with caught.exception:
@@ -392,12 +486,14 @@ class AgentdTestCase(unittest.TestCase):
         # 本文を読めない形式のまま既定値で動詞を実行しない
         connection = http.client.HTTPConnection("127.0.0.1", self.server.server_address[1], timeout=10)
         connection.putrequest("POST", "/v1/relaunch", skip_accept_encoding=True)
+        self.put_auth_headers(connection)
         connection.endheaders()  # Content-Length も Transfer-Encoding も無い
         self.assertEqual(connection.getresponse().status, 411)
         connection.close()
 
         connection = http.client.HTTPConnection("127.0.0.1", self.server.server_address[1], timeout=10)
         connection.putrequest("POST", "/v1/relaunch", skip_accept_encoding=True)
+        self.put_auth_headers(connection)
         connection.putheader("Content-Length", "-1")
         connection.endheaders()
         self.assertEqual(connection.getresponse().status, 400)
@@ -407,6 +503,7 @@ class AgentdTestCase(unittest.TestCase):
     def test_chunked_body_is_rejected(self):
         connection = http.client.HTTPConnection("127.0.0.1", self.server.server_address[1], timeout=10)
         connection.putrequest("POST", "/v1/relaunch", skip_accept_encoding=True)
+        self.put_auth_headers(connection)
         connection.putheader("Transfer-Encoding", "chunked")
         connection.endheaders()
         connection.send(b"2\r\n{}\r\n0\r\n\r\n")

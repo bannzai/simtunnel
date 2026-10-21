@@ -175,6 +175,7 @@ WDA では届かない領域（起動引数を要する状態の作り込み、�
 - `push` の payload は `aps` オブジェクト必須・入れ子 6 段まで・JSON の基本型のみ。宛先の決定をサーバ側に一本化するため、`Simulator Target Bundle` を含む payload は拒否する
 - `simctl spawn` / `openurl` / `keychain` / `addmedia` など、**シミュレータ内での任意実行やホストのファイル参照につながる動詞は追加しない**
 - 呼び出しの監査ログは runner ローカル（`$RUNNER_TEMP/agentd-audit.log`）にだけ記録する。HTTP サーバの既定のアクセスログも stderr ではなくこのファイルへ流し、public repo の run ログ・ステップサマリに値を出さない
+- **ブラウザからの要求（CSRF）を受けない**。tailnet メンバーが開いた Web ページは、そのメンバーのブラウザから `:8200` に到達できてしまうため、POST には `Content-Type: application/json`（無い・違えば 415）と、セッションごとのトークンの `X-Simtunnel-Token` ヘッダー（無い・違えば 401）を必須にし、`Origin` ヘッダー付きの要求は 403 で拒否する（CLI と MCP クライアントは `Origin` を送らない）。トークンは agentd が起動時に作ってメモリにだけ持ち、`GET /token` で渡す。クロスオリジンのページは CORS に応じない応答を読めず、DNS rebinding で同一オリジンになったページは Host 名で弾く（`GET /token` は Host が IP・`localhost`・`simtunnel-<session>`（とその `*.ts.net` の FQDN）の時だけ応じる）。トークンは run ログ・ステップサマリにも監査ログにも書かない。これは「到達できないこと」を前提にした上での CSRF 対策で、認証で公開エンドポイントにする方向（「機能追加でこの前提を崩さないための判断基準」）とは別物
 - **録画ファイルを転送するエンドポイントは持たない**。`record/stop` は runner 上のパスとサイズを返すだけにする。DERP relay 経由（実測 約 60KB/s）では動画の取り出しが現実的な時間で終わらず、ローカル側の録画は `simtunnel record` で足りるため
 - **runner 側の録画は 1 slot につき 1 本・最長 10 分・停止済みの保持は直近 5 本**。`record/start` は同じ slot の実行中の録画を止めてから始め、止め忘れた録画もサーバ側の watchdog が打ち切る。応答が届かず `recordingId` を受け取れなかったクライアントは録画を止められず、放っておくとジョブが終わるまで書き続けて runner のディスクを圧迫するため。停止済みの録画も 5 本を超えた分は古いものから動画とログを消す（1 本 10 分の上限だけでは、録画を繰り返すと本数の累積で runner のディスクを使い切る。転送エンドポイントを持たない以上、残す意味があるのは同じセッション中に確認できる直近の数本だけ）
 
@@ -185,18 +186,14 @@ WDA では届かない領域（起動引数を要する状態の作り込み、�
 - **`simctl io recordVideo` をきれいに終わらせられるのは SIGINT だけ**（実測 2026-08-17）。SIGTERM でも SIGKILL でも、その runner のホスト録画が `Resource busy`（`Host recording is already in progress`）のまま残り、以降の `record/start` が全て失敗する。停止は SIGINT を間を置いて 4 回まで送り、SIGKILL は放置するとディスクを食い潰す場合の最後の手段にする。この状態になったセッションでは runner 側の録画を諦め、ローカル側の `simtunnel record` を使う
 - **`record/start` の直後は simctl が SIGINT を取りこぼす**（実測 2026-08-17）。`record/start` は simctl がログに `Recording started` を出す（= 録画が実際に始まる。出力ファイルは停止時にまとめて書かれるため開始判定には使えない）まで待ってから応答を返すことで、直後の `record/stop` でも SIGINT が効くようにしている
 
-呼び出しはセッション名で直接 curl する（専用の CLI サブコマンドは持たない）:
+動詞の呼び出しは `local/simtunnel agentd` で行う（`GET /token` でトークンを取り、`Content-Type` と `X-Simtunnel-Token` を付けて POST する）:
 
 ```bash
 curl -s http://simtunnel-<session>:8200/status
-curl -s -X POST http://simtunnel-<session>:8200/v1/relaunch \
-  -H 'Content-Type: application/json' -d '{"slot": 0, "args": ["-UITEST", "1"]}'
-curl -s -X POST http://simtunnel-<session>:8200/v1/push \
-  -H 'Content-Type: application/json' -d '{"payload": {"aps": {"alert": "夜のふりかえりの時間です"}}}'
-curl -s -X POST http://simtunnel-<session>:8200/v1/privacy \
-  -H 'Content-Type: application/json' -d '{"action": "revoke", "service": "photos"}'
-curl -s -X POST http://simtunnel-<session>:8200/v1/status_bar \
-  -H 'Content-Type: application/json' -d '{"time": "09:41", "batteryLevel": 100}'
+simtunnel agentd <session> relaunch '{"slot": 0, "args": ["-UITEST", "1"]}'
+simtunnel agentd <session> push '{"payload": {"aps": {"alert": "夜のふりかえりの時間です"}}}'
+simtunnel agentd <session> privacy '{"action": "revoke", "service": "photos"}'
+simtunnel agentd <session> status_bar '{"time": "09:41", "batteryLevel": 100}'
 ```
 
 Tailscale ACL で宛先ポートを列挙している場合は、`8200` を許可対象に追加する（許可していないと tailnet 内からも到達できない）。
@@ -299,8 +296,7 @@ SIMTUNNEL_REPO=<owner>/<repo> local/simtunnel up <session> --wait
 ```bash
 simtunnel up <session> --wait
 # preset 名 → 引数列の対応はローカル側で持つ（このリポジトリではなく呼び出し側の運用）
-curl -s -X POST http://simtunnel-<session>:8200/v1/relaunch \
-  -H 'Content-Type: application/json' -d '{"slot": 0, "args": ["-ONBOARDING_DONE", "1"]}'
+simtunnel agentd <session> relaunch '{"slot": 0, "args": ["-ONBOARDING_DONE", "1"]}'
 ```
 
 **アプリの初回 launch から効かせる必要がある場合**: `session.yml` の `launch_args` input に渡す。runner 上の install / launch は `session.yml` と同じ job で行われるため、Simulator の状態を跨がずに起動引数が効く。値は agentd の `relaunch` と同じ制限（文字種 `[A-Za-z0-9_=-]`・16 個まで・1 個 64 文字まで）の検証を reusable workflow 側でも行い、拒否した値は public な run ログに出さない（caller が `type: choice` で絞っていることに依存せず、単体で成立させるため）。このリポジトリ自身の caller（`simulator-session.yml`）も `launch_preset`（`type: choice`）から引数列を引く形にしてあり、サンプルアプリは起動引数を読まないが、この経路を実 run で確認する用途に使える。
