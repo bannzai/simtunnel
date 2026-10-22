@@ -166,6 +166,8 @@ WDA では届かない領域（起動引数を要する状態の作り込み、�
 - `POST /v1/record/start`: body は `{"slot": <0 始まりの Simulator 番号。省略時 0>}`。応答 `{"recordingId": "<record/stop に渡す不透明な文字列>", "path": "<runner 上の出力先>", "maxSeconds": 600}`。同じ slot に実行中の録画があれば止めてから開始する（1 slot 1 本）。`recordingId` を受け取れないまま `maxSeconds` を超えると、サーバ側の watchdog が自動停止する
 - `POST /v1/record/stop`: body は `{"recordingId": "<record/start が返した値>"}`。応答 `{"path": "<runner 上の出力先>", "bytes": <ファイルサイズ>}`。runner 上の動画そのものは返さない（「録画ファイルを転送するエンドポイントは持たない」参照）
 
+`GET /status` は `{"ok": true, "slots": <台数>, "verbs": [<許可した動詞>], "run_id": "<GITHUB_RUN_ID>"}` を返す。`run_id` はローカルの CLI が接続先のノードをこの run のものか照合するために使う（「MCP の登録」の接続先の検証）。run id は public repo では誰でも見られる値で、秘匿情報ではない。
+
 **主体は増えず、能力だけが増える**: `:8200` に到達できるのは、既に `:8100` の無認証 WDA でシミュレータを完全操作できる tailnet 内の自分のデバイスだけ。新しく到達できる相手は生まれないため、「機能追加でこの前提を崩さないための判断基準」の範囲内に収まる。
 
 安全側の設計（実装は `runner/agentd.py`、検証は `runner/test/test-agentd.py`）:
@@ -575,6 +577,7 @@ simtunnel/
 │   ├── start-serve-sim.sh            # serve-sim を起動（ブラウザ操作 UI + ライブ映像を :3200 で配信）
 │   ├── agentd.py                     # simtunnel-agentd: 許可した simctl 動詞だけを :8200 で受ける HTTP サーバ
 │   ├── start-agentd.sh               # agentd.py をバックグラウンド起動して :8200 の応答を待つ
+│   ├── start-run-id-server.sh        # agentd の無い macOS セッションで :8200/status に run_id を返す（接続先の照合用）
 │   ├── test/test-agentd.py           # agentd の許可リスト検証（xcrun をスタブに差し替えて実行）
 │   ├── test/test-install-app.sh      # install-app.sh が app_zip_url の資格情報をログに出さないことの検証（curl 等をスタブに差し替えて実行）
 │   ├── bridge.sh                     # socat: tailscale IF → 指定ポート（直接到達可能ならスキップ）
@@ -609,6 +612,8 @@ worktree のプロジェクトルートに `.mcp.json` を置く:
 ```bash
 <simtunnel リポジトリの絶対パス>/local/simtunnel mcp-config <session> [worktree のパス] [--name mobile]
 ```
+
+生成ヘルパーは `SIMTUNNEL_WDA_URL` に MagicDNS 名ではなく、検証済みのノードの IP を書く。ホスト名 `simtunnel-<session>` は tailnet の任意のノードが名乗れる値のため、`local/simtunnel` は接続先（status / screenshot / record / preview / wait / mcp-config）を次の 3 つを満たすノードに限る: `tailscale status --json` の HostName が `simtunnel-<session>` で online（同名のノードが先にいると MagicDNS 名には `-1` 等が付くため、MagicDNS 名では絞らない）、Tags に `tag:ci` がある（OIDC で参加した runner だけが持つ）、ノードの `:8200/status` が返す `run_id` が対象 repo の in_progress の `session=<session>` の run id のどれかと一致する（tailscale のノード情報に run id は載らないため、runner 側が `GITHUB_RUN_ID` を申告する。iOS は agentd の `/status`、macOS は `runner/start-run-id-server.sh` が返す）。runner 側の申告は session.yml / macos-session.yml に入っているため、アプリ repo の caller workflow が固定している SHA がこの変更より前だと接続先として採用されない（固定の SHA を上げる）。IP はセッションごとに変わるため、`up` し直したら `mcp-config` も実行し直す。tailnet の実 IP をリポジトリに入れないため、書き出し先が git 管理下で `.mcp.json` が ignore されていない（`.gitignore` / `.git/info/exclude` に無い、または追跡済み）時は書かずに失敗する。
 
 ### mobile-mcp 互換ツール
 
@@ -747,7 +752,7 @@ env = { SIMTUNNEL_WDA_URL = "http://simtunnel-<session>:8100" }
 - ~~WDA 起動時間~~: **解決済み（Phase 4）**。ビルドキャッシュ導入で dispatch → 操作可能は約 2.8 分（キャッシュヒット時）
 - **`down` 直後の同名セッション再起動**: 実測（2026-07-07）では ephemeral node は cancel 送信の約 20 秒後に tailnet から消えた。ただし再 up を実際にブロックするのは run のキャンセル完了待ちで、cancel 送信後もしばらく（数十秒〜1 分程度）GitHub API 上は run が in_progress のままのため、`up <同名>` は「run はすでに起動中」の冪等チェックに当たって何もしない。`simtunnel list` で run が completed になったのを確認してから `up` する。作り直しが目的なら `up <session> --force` が既存 run のキャンセル → run の終了待ち → node 登録の消滅待ち → 再 dispatch までを一括で行う
 - **同時実行上限**: Free プランは macOS 5 並列。worktree を跨いだ総セッション数の上限になる。実測済み（2026-07-07: repo 横断で 5 job が in_progress の状態で追加 dispatch した job は queued のまま待機し、スロットが空くと自動で開始した。上限はセッション用 workflow に限らず、同一アカウントの全 macOS job（他 workflow の run 含む）で共有される）
-- **repo を跨いだ同名セッション**: 同時起動防止の concurrency group は repo 単位のため、別 repo で同名セッションを起動すると tailnet ホスト名 `simtunnel-<session>` が衝突する。実測（2026-07-07）では後から join したノードに `-1` が付き（`simtunnel-<session>-1`）、`simtunnel-<session>` の名前解決は先着ノードを指し続けるため、**CLI は別 repo の先着セッションに黙って接続する**（エラーにならないのが危険）。repo ごとに接頭辞を変える等、セッション名の一意性は運用で担保する
+- **repo を跨いだ同名セッション**: 同時起動防止の concurrency group は repo 単位のため、別 repo で同名セッションを起動すると tailnet ホスト名 `simtunnel-<session>` が衝突する。実測（2026-07-07）では後から join したノードに `-1` が付き（`simtunnel-<session>-1`）、`simtunnel-<session>` の名前解決は先着ノードを指し続ける。`local/simtunnel` はノードが申告する run id を対象 repo の run と照合するため、別 repo の同名セッションには接続しない（対象 repo のノードが `-1` 付きで後から参加していればそちらに接続する。MagicDNS 名で直接叩く `curl` や手書きの `.mcp.json` は先着ノードに繋がる）。repo ごとに接頭辞を変える等、セッション名の一意性は運用で担保する
 - **Runner スペック**: GitHub-hosted macOS (arm64) はメモリが小さめ。1 runner 複数 Simulator は 2 台（サンプルアプリ + serve-sim なし）で成立を実測済み（Phase 4）。3 台以上や重いアプリでの成立性は要検証
-- **MagicDNS の伝播ラグ**: ephemeral node の tailnet 参加後、`simtunnel-<session>` の名前解決ができるまで数分かかることがある（実測 2026-07-06。IP 直なら即到達可能）。`.mcp.json` のホスト名接続が ready 直後に ENOTFOUND になったら少し待って再試行する。OS の resolver（dscacheutil）は解決できているのに Node の fetch だけ失敗が続く事例も観測した（2026-07-07）。急ぐ場合は `SIMTUNNEL_WDA_URL` を IP 直（`tailscale status` で取得）にすれば確実に繋がる
+- **MagicDNS の伝播ラグ**: ephemeral node の tailnet 参加後、`simtunnel-<session>` の名前解決ができるまで数分かかることがある（実測 2026-07-06。IP 直なら即到達可能）。手書きの `.mcp.json` のホスト名接続が ready 直後に ENOTFOUND になったら少し待って再試行する。OS の resolver（dscacheutil）は解決できているのに Node の fetch だけ失敗が続く事例も観測した（2026-07-07）。`mcp-config` は検証済みのノードの IP を書くため、この影響を受けない
 - **keepalive 中の WDA 無応答**: keepalive の死活チェックが失敗し run が failure 終了する事象を計 3 回観測（2026-07-06: simtunnel 本体で開始 5 秒後 x1、Pilll で開始 約5 分後 / 35 秒後 x2）。重いアプリ（Flutter + Firebase の Pilll）のセッションで発生率が高く、runner のメモリ圧が疑わしい（GitHub-hosted macOS runner は RAM が小さい）。対策として keepalive は連続 4 回失敗した時だけ終了し、終了時に wda.log 末尾を出力する。**対策の効果を実測済み**（2026-07-06: Pilll + serve-sim 有効のセッションで開始 25 秒後に無応答 1 回 → 回復 → ブラウザ preview 利用込みで 60 分完走。無応答は一時的なストールで、連続失敗しきい値で吸収できる）。セッションが早期に消えたら run の failure step と wda.log を確認し、再度 `up` する。切り分け用に caller で `serve_sim: "false"` にしてメモリ消費を減らす手もある

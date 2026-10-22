@@ -137,10 +137,15 @@ class AgentdTestCase(unittest.TestCase):
 
     # --- 許可した動詞が通ること ----------------------------------------
     def test_status_lists_allowed_verbs(self):
-        with urllib.request.urlopen(self.base_url + "/status", timeout=10) as response:
-            body = json.loads(response.read().decode("utf-8"))
+        os.environ["GITHUB_RUN_ID"] = "123456789"
+        try:
+            with urllib.request.urlopen(self.base_url + "/status", timeout=10) as response:
+                body = json.loads(response.read().decode("utf-8"))
+        finally:
+            del os.environ["GITHUB_RUN_ID"]
         self.assertEqual(response.status, 200)
         self.assertEqual(body["slots"], len(SLOT_UDIDS))
+        self.assertEqual(body["run_id"], "123456789")
         self.assertEqual(
             body["verbs"], sorted(["relaunch", "push", "record/start", "record/stop", "privacy", "status_bar"])
         )

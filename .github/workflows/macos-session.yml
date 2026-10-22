@@ -142,6 +142,11 @@ jobs:
         timeout-minutes: 30
         run: ./simtunnel/runner/start-wda-mac.sh "$WDA_PORT"
 
+      # ローカルの CLI が接続先のノードをこの run のものか照合するための受け口（iOS では agentd が兼ねる）
+      - name: run_id の受け口を起動
+        timeout-minutes: 5
+        run: ./simtunnel/runner/start-run-id-server.sh
+
       # キャッシュミス時のみ保存する。ジョブは down で cancel されるため、
       # post step 任せにせずビルド直後に明示的に保存する
       - name: WDA-mac ビルドキャッシュを保存
@@ -163,7 +168,7 @@ jobs:
 
       - name: tailnet へブリッジ
         timeout-minutes: 10
-        run: ./simtunnel/runner/bridge.sh "$WDA_PORT"
+        run: ./simtunnel/runner/bridge.sh "$WDA_PORT" 8200
 
       - name: セッション情報を出力
         env:

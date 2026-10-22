@@ -75,11 +75,38 @@ ts_bin() {
   fi
 }
 
-# tailnet に参加している simtunnel-<session> の IP を返す（未参加なら空）。
-# 終了済みセッションの node が offline のまま一覧に残ることがあるため、offline の peer は対象にしない
+# $REPO で実行中の session の run が起動した simtunnel-<session> の IPv4 を返す（検証できるノードが無ければ空）。
+# ホスト名は任意の tailnet ノードが名乗れる値で身元の確認に使えないため、OIDC で参加した runner だけが持つ
+# tag:ci と、ノード上の agentd が返す run_id が $REPO の in_progress の run id のどれかと一致することを確かめる
+# （tailscale のノード情報には run id が載らない）。同名のノードが先にいると後から参加したノードの MagicDNS 名には
+# 接尾辞が付くため、名前は MagicDNS 名ではなく、ノードが申告した HostName で絞る。
+# 終了済みセッションの node が offline のまま一覧に残ることがあるため、offline の peer は対象にしない。
+# 前提: $REPO が確定していること（ensure_repo 済み）
 session_ip() {
   local session=$1
-  "$(ts_bin)" status 2>/dev/null | awk -v h="simtunnel-${session}" '$2 == h && $5 != "offline" {print $1; exit}'
+  local run_ids candidate_ip agentd_run_id
+  run_ids=$(session_in_progress_run_ids "$session")
+  [ -n "$run_ids" ] || return 0
+  for candidate_ip in $("$(ts_bin)" status --json 2>/dev/null | jq -r \
+    --arg host "simtunnel-${session}" \
+    '.Peer[]?
+     | select(.HostName == $host)
+     | select(.Online == true)
+     | select((.Tags // []) | index("tag:ci"))
+     | [.TailscaleIPs[]? | select(test("^[0-9.]+$"))][0] // empty' 2>/dev/null); do
+    # 打ち切りは cmd_status が WDA の /status に使う 10 秒にそろえる（どちらも DERP relay 経由の遅延を見込む）
+    agentd_run_id=$(curl -fsS -m 10 "http://${candidate_ip}:8200/status" 2>/dev/null | jq -r '.run_id // empty' 2>/dev/null) || continue
+    if [ -n "$agentd_run_id" ] && grep -qxF "$agentd_run_id" <<<"$run_ids"; then
+      echo "$candidate_ip"
+      return 0
+    fi
+  done
+}
+
+# session_ip の前提（jq と $REPO の確定）を揃える。up から cmd_wait に入った時は確定済みの $REPO を使う
+ensure_session_ip_prerequisites() {
+  command -v jq >/dev/null 2>&1 || { echo "jq が必要（brew install jq）" >&2; return 1; }
+  [ -n "$REPO" ] || ensure_repo
 }
 
 # session 名に一致する実行中/待機中の run を "runID<TAB>status<TAB>headBranch<TAB>headSha" で列挙する
@@ -88,6 +115,23 @@ session_runs() {
   gh run list -R "$REPO" --workflow "$WORKFLOW" -L 50 \
     --json databaseId,displayTitle,status,headBranch,headSha \
     --jq ".[] | select(.status != \"completed\") | select(.displayTitle | startswith(\"session=${session} \")) | [.databaseId, .status, .headBranch, .headSha] | @tsv"
+}
+
+# session 名に一致する in_progress の run id を 1 行ずつ返す。
+# ノードは run の job が動いている間だけ参加するため in_progress に絞り、完了済みの後続 run で
+# 稼働中の run が -L の件数から押し出されないようにする
+session_in_progress_run_ids() {
+  local session=$1
+  gh run list -R "$REPO" --workflow "$WORKFLOW" --status in_progress -L 50 \
+    --json databaseId,displayTitle \
+    --jq ".[] | select(.displayTitle | startswith(\"session=${session} \")) | .databaseId"
+}
+
+# simtunnel-<session> を名乗る online の node が tailnet にあるか（身元は確かめない）。
+# $REPO に run が無いのに node がある時の、repo の取り違えの案内にだけ使う。接続先は session_ip で決める
+session_node_online() {
+  local session=$1
+  "$(ts_bin)" status 2>/dev/null | awk -v h="simtunnel-${session}" '$2 == h && $5 != "offline" {found=1; exit} END {exit !found}'
 }
 
 # simtunnel-<session> の node 登録が tailnet に残っているか (offline 含む)。
@@ -205,10 +249,9 @@ cmd_up() {
     fi
   fi
 
-  local ip runs
-  ip=$(session_ip "$session")
+  local runs
   runs=$(session_runs "$session")
-  if [ -n "$ip" ] || [ -n "$runs" ]; then
+  if session_node_online "$session" || [ -n "$runs" ]; then
     if [ -z "$runs" ]; then
       warn_repo_mismatch "$session"
       return 1
@@ -270,18 +313,18 @@ cmd_up() {
 # WDA が応答するまで待つ（最大 20 分）
 cmd_wait() {
   local session=$1
+  ensure_session_ip_prerequisites || return 1
   echo "simtunnel-${session} の準備完了を待機中（WDA ビルド込みで 10 分前後かかる）..."
   for _ in $(seq 1 80); do
     local ip
     ip=$(session_ip "$session")
     if [ -n "$ip" ] && [ "$(curl -s -m 3 -o /dev/null -w '%{http_code}' "http://${ip}:8100/status" 2>/dev/null)" = "200" ]; then
-      echo "ready: http://simtunnel-${session}:8100 (${ip})"
+      echo "ready: http://${ip}:8100"
       return 0
     fi
     sleep 15
   done
-  # 直接 simtunnel wait を叩いた場合は $REPO が未解決のため、確認コマンドはプレースホルダーで案内する
-  echo "20 分以内に準備完了しなかった。run の状態: gh run list -R ${REPO:-<owner>/<repo>} -w ${WORKFLOW}" >&2
+  echo "20 分以内に準備完了しなかった。run の状態: gh run list -R ${REPO} -w ${WORKFLOW}" >&2
   return 1
 }
 
@@ -291,7 +334,7 @@ cmd_down() {
   local ids
   ids=$(session_runs "$session" | cut -f1)
   if [ -z "$ids" ]; then
-    if [ -n "$(session_ip "$session")" ]; then
+    if session_node_online "$session"; then
       warn_repo_mismatch "$session"
       return 1
     fi
@@ -321,10 +364,11 @@ cmd_status() {
     esac
   done
   validate_slot "$slot" || return 1
+  ensure_session_ip_prerequisites || return 1
   local ip
   ip=$(session_ip "$session")
   if [ -z "$ip" ]; then
-    echo "simtunnel-${session} は tailnet に存在しない（未起動 or 準備中）" >&2
+    echo "simtunnel-${session} は tailnet に存在しない（未起動 or 準備中。tag:ci を持ち ${REPO} の run が起動したノードだけを対象にする）" >&2
     return 1
   fi
   curl -s -m 10 -w "\nHTTP %{http_code} / %{time_total}s\n" "http://${ip}:$((8100 + slot))/status"
@@ -343,6 +387,7 @@ cmd_screenshot() {
   done
   validate_slot "$slot" || return 1
   [ -n "$out" ] || out="./tmp/simtunnel-${session}-$(date +%H%M%S).jpg"
+  ensure_session_ip_prerequisites || return 1
   local ip
   ip=$(session_ip "$session")
   [ -n "$ip" ] || { echo "simtunnel-${session} は tailnet に存在しない" >&2; return 1; }
@@ -408,6 +453,7 @@ cmd_record() {
     raw="${stem}.mjpeg"
     mp4_out="${stem}.mp4"
   fi
+  ensure_session_ip_prerequisites || return 1
   local ip
   ip=$(session_ip "$session")
   [ -n "$ip" ] || { echo "simtunnel-${session} は tailnet に存在しない" >&2; return 1; }
@@ -528,8 +574,18 @@ cmd_mcp_config() {
     esac
   done
   validate_slot "$slot" || return 1
-  command -v jq >/dev/null 2>&1 || { echo "jq が必要（brew install jq）" >&2; return 1; }
+  ensure_session_ip_prerequisites || return 1
   [ -d "$dir" ] || { echo "ディレクトリが存在しない: $dir" >&2; return 1; }
+  # .mcp.json には tailnet の実 IP を書くため、git 管理下では ignore されている時だけ書く（追跡済みのファイルは ignore されない扱いになる）
+  if git -C "$dir" rev-parse --is-inside-work-tree >/dev/null 2>&1 \
+    && ! git -C "$dir" check-ignore -q .mcp.json; then
+    echo "${dir}/.mcp.json が git で ignore されていない。tailnet の実 IP を書くため、.gitignore か .git/info/exclude に .mcp.json を足してから再実行して" >&2
+    return 1
+  fi
+  # MagicDNS 名はホスト名を名乗ったノードへ解決されるため、URL は session_ip で検証したノードの IP にする
+  local ip
+  ip=$(session_ip "$session")
+  [ -n "$ip" ] || { echo "simtunnel-${session} は tailnet に存在しない（起動後に再実行して）" >&2; return 1; }
 
   local repo_root file existing merged script_path link
   # ~/bin/simtunnel 等の symlink 経由で起動しても実体のリポジトリを repo_root にする
@@ -548,7 +604,7 @@ cmd_mcp_config() {
   if [ -f "$file" ]; then
     existing=$(jq . "$file") || { echo "既存の ${file} が JSON として不正。手で直してから再実行して" >&2; return 1; }
   fi
-  local wda_url="http://simtunnel-${session}:$((8100 + slot))"
+  local wda_url="http://${ip}:$((8100 + slot))"
   merged=$(jq -n \
     --argjson existing "$existing" \
     --arg name "$name" \
@@ -569,6 +625,7 @@ cmd_agentd() {
   local verb=$1 body=${2:-"{}"}
   # URL のパスに入るため、agentd の動詞の形（relaunch / record/start 等）だけを受け付ける
   [[ "$verb" =~ ^[a-z_]+(/[a-z_]+)?$ ]] || { echo "動詞の形式が不正: ${verb}" >&2; return 1; }
+  ensure_session_ip_prerequisites || return 1
   local ip token
   ip=$(session_ip "$session")
   [ -n "$ip" ] || { echo "simtunnel-${session} は tailnet に存在しない" >&2; return 1; }
@@ -588,6 +645,8 @@ cmd_agentd() {
 
 # serve-sim の preview UI をブラウザで開く。
 # preview UI は Host ヘッダから stream URL を組み立てるため、IP ではなく MagicDNS 名で開く。
+# simtunnel-<session> は同名を先に名乗ったノードへ解決されるため、session_ip で検証したノード自身の
+# MagicDNS 名（後から参加した時は simtunnel-<session>-1 等）を使う。
 # preview UI は全 Simulator を配信しており、slot 0 は既定で表示される。--slot 1 以降は
 # ?device=<UDID> で対象を指定する。slot→UDID は serve-sim の /grid/api の一覧を
 # boot-simulator.sh の clone 命名（"<デバイス名> simtunnel-<slot+1>"）で引き当てる
@@ -601,12 +660,15 @@ cmd_preview() {
     esac
   done
   validate_slot "$slot" || return 1
-  local ip
+  ensure_session_ip_prerequisites || return 1
+  local ip node_dns_name
   ip=$(session_ip "$session")
   [ -n "$ip" ] || { echo "simtunnel-${session} は tailnet に存在しない" >&2; return 1; }
-  local url="http://simtunnel-${session}:3200"
+  node_dns_name=$("$(ts_bin)" status --json 2>/dev/null | jq -r --arg ip "$ip" \
+    '[.Peer[]? | select((.TailscaleIPs // []) | index($ip)) | .DNSName // empty | rtrimstr(".")][0] // empty')
+  [ -n "$node_dns_name" ] || { echo "simtunnel-${session} (${ip}) の MagicDNS 名を取得できなかった" >&2; return 1; }
+  local url="http://${node_dns_name}:3200"
   if [ "$slot" -gt 0 ]; then
-    command -v jq >/dev/null 2>&1 || { echo "--slot には jq が必要（brew install jq）" >&2; return 1; }
     # /grid/api は runner 上の全 Simulator を返すため、Booted かつ clone 名のものに絞る。
     # 初回コールは一覧が温まっておらず空を返すことがある（実測）ためリトライする
     local udid=""
