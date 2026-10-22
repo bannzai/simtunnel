@@ -13,7 +13,7 @@ GitHub Actions の macOS Runner 上で iOS Simulator + WebDriverAgent を起動�
 
 ## セッション操作
 - `local/simtunnel` CLI を使う: `up <session> [--wait]` / `down <session>` / `list` / `status <session>` / `screenshot <session>` / `record <session>`（オプションはスクリプト冒頭の使い方を参照）
-- simctl を要する操作（起動引数付きの再起動・通知の合成・権限・ステータスバー）は runner の agentd に curl で送る（動詞と引数の仕様は PROJECT.md「simtunnel-agentd」参照）
+- simctl を要する操作（起動引数付きの再起動・通知の合成・権限・ステータスバー）は `local/simtunnel agentd <session> <verb> '<JSON>'` で runner の agentd に送る（agentd はトークンの無い POST を拒否するため curl で直接送らない。動詞と引数の仕様は PROJECT.md「simtunnel-agentd」参照）
 - 放置しても `duration_minutes`（既定 60 分）で自動終了する
 
 ## サンプルアプリ

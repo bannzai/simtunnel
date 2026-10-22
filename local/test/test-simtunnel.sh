@@ -11,6 +11,8 @@ bin_dir="${test_dir}/bin"
 gh_log="${test_dir}/gh.log"
 curl_log="${test_dir}/curl.log"
 session_ready="${test_dir}/session-ready"
+curl_post_log="${test_dir}/curl-post.log"
+open_log="${test_dir}/open.log"
 # gh run list が返す run（runID / status / headBranch / headSha の TSV。--status in_progress の時は runID だけを返す）
 runs_file="${test_dir}/runs.tsv"
 # tailscale status --json の出力
@@ -76,12 +78,27 @@ case "$url" in
     run_id=$(awk -v ip="$ip" '$1 == ip {print $2; exit}' "$AGENTD_RUN_IDS_FILE")
     [ -n "$run_id" ] || exit 7
     printf '{"ok": true, "run_id": "%s"}\n' "$run_id"
+    exit 0
+    ;;
+esac
+case "$*" in
+  *:8200/token*) printf '{"token": "test-token"}' ;;
+  *:8200/v1/*)
+    # -H @- で渡されたトークンのヘッダーも記録する
+    { printf '%s\n' "$*"; cat; } >"$CURL_POST_LOG"
+    printf '{"ok": true}'
     ;;
   *) printf '200' ;;
 esac
 EOF
 
-chmod +x "${bin_dir}/gh" "${bin_dir}/git" "${bin_dir}/tailscale" "${bin_dir}/curl"
+# preview がブラウザで開く URL を記録する
+cat >"${bin_dir}/open" <<'EOF'
+#!/bin/bash
+printf '%s' "$1" >"$OPEN_LOG"
+EOF
+
+chmod +x "${bin_dir}/gh" "${bin_dir}/git" "${bin_dir}/tailscale" "${bin_dir}/curl" "${bin_dir}/open"
 
 run_simtunnel() {
   PATH="${bin_dir}:$PATH" \
@@ -92,6 +109,8 @@ run_simtunnel() {
     RUNS_FILE="$runs_file" \
     PEERS_FILE="$peers_file" \
     AGENTD_RUN_IDS_FILE="$agentd_run_ids_file" \
+    CURL_POST_LOG="$curl_post_log" \
+    OPEN_LOG="$open_log" \
     SIMTUNNEL_REPO="example/repo" \
     "$simtunnel" "$@"
 }
@@ -185,6 +204,15 @@ output=$(run_simtunnel up sample --ref feature --device "iPhone 17 Pro" --durati
 grep -q 'workflow run simulator-session.yml -R example/repo --ref feature -f session=sample -f device=iPhone 17 Pro -f duration_minutes=30' "$gh_log"
 grep -q 'ready: http://100.64.0.1:8100' <<<"$output"
 
+# agentd の POST に Content-Type と GET /token で取得したトークンが付く
+run_simtunnel agentd sample relaunch '{"args": ["-UITEST"]}' >/dev/null
+grep -q -- '-X POST http://100.64.0.1:8200/v1/relaunch -H Content-Type: application/json -H @- -d {"args": \["-UITEST"\]}' "$curl_post_log"
+grep -qx 'X-Simtunnel-Token: test-token' "$curl_post_log"
+if run_simtunnel agentd sample '../status' >/dev/null 2>&1; then
+  echo "不正な動詞が受理された" >&2
+  exit 1
+fi
+
 echo "PASS: local/simtunnel の引数解析"
 
 # status が WDA の /status に接続した IP を返す（接続しなかった時は空）
@@ -260,6 +288,20 @@ assert_status_target "" "対象 repo に実行中の run が無い"
 write_runs
 
 echo "PASS: session_ip の接続先検証"
+
+# preview は検証したノード自身の MagicDNS 名で開く（先着の別ノードに解決される simtunnel-sample ではなく -1 の方）
+: >"$peers_file"
+write_peer simtunnel-sample simtunnel-sample 100.64.0.9 true '["tag:ci"]'
+write_peer simtunnel-sample simtunnel-sample-1 100.64.0.1 true '["tag:ci"]'
+finish_peers
+printf '100.64.0.9 222\n100.64.0.1 111\n' >"$agentd_run_ids_file"
+run_simtunnel preview sample >/dev/null
+[ "$(cat "$open_log")" = "http://simtunnel-sample-1.example-tailnet.ts.net:3200" ] || {
+  echo "preview が検証済みノードの MagicDNS 名を開いていない: $(cat "$open_log")" >&2
+  exit 1
+}
+
+echo "PASS: preview の接続先"
 
 mcp_dir="${test_dir}/mcp"
 mkdir -p "$mcp_dir"

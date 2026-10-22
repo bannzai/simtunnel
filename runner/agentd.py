@@ -8,10 +8,13 @@
 クライアントから受けるのは動詞 + スキーマ検証済みの引数のみで、コマンド文字列・ファイルパス・
 スクリプト本文は一切受けない。対象 Simulator はサーバ側が slot から解決し、UDID は受けない。
 """
+import hmac
+import ipaddress
 import json
 import math
 import os
 import re
+import secrets
 import shlex
 import signal
 import subprocess
@@ -77,10 +80,34 @@ STATUS_BAR_OPTIONS = {
 MAX_PAYLOAD_DEPTH = 6
 MAX_PAYLOAD_KEYS = 64
 
+# POST に必須のトークンを載せるヘッダー。独自ヘッダーはブラウザがクロスオリジンで送る前に
+# preflight を要し、agentd は CORS に応じないため、ブラウザ経由の要求には付けられない
+TOKEN_HEADER = "X-Simtunnel-Token"
+# GET /token に応じる Host 名（IP 直指定と localhost 以外）。tailnet 内の到達経路の MagicDNS 名
+# （simtunnel-<session> と、その FQDN）だけを許し、DNS rebinding で別ドメインの名前のまま
+# agentd に届いたページにトークンを読ませない
+TOKEN_HOST_PATTERN = re.compile(r"simtunnel-[a-z0-9-]+(\.[a-z0-9-]+\.ts\.net)?")
+
 
 def reject_json_constant(name):
     """json.loads の parse_constant。NaN / Infinity / -Infinity を受け付けず ValueError にする"""
     raise ValueError(f"JSON の仕様外の定数: {name}")
+
+
+def is_token_host(host_header):
+    """Host ヘッダーの値が、GET /token に応じてよい宛先（IP 直指定・localhost・TOKEN_HOST_PATTERN）なら True"""
+    host = (host_header or "").strip().lower()
+    if host.startswith("["):
+        host = host[1:host.find("]")] if "]" in host else ""
+    elif ":" in host:
+        host = host.rsplit(":", 1)[0]
+    if host == "localhost" or TOKEN_HOST_PATTERN.fullmatch(host):
+        return True
+    try:
+        ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return True
 
 
 class RequestError(Exception):
@@ -102,6 +129,9 @@ class Agentd:
         self.work_dir = work_dir
         os.makedirs(self.work_dir, exist_ok=True)
         self.audit_path = os.path.join(self.work_dir, "agentd-audit.log")
+        # POST に必須のセッションのトークン。agentd はセッションごとに 1 プロセスのため、プロセスの
+        # 起動時に作ればセッションごとの値になる。public repo の run ログに出さないよう、メモリにだけ持つ
+        self.token = secrets.token_urlsafe(32)
         # recordingId -> 実行中の録画。watchdog スレッドからも触るためロックで守る
         self.recordings = {}
         # 停止済みの録画の (動画パス, ログパス) を古い順に持ち、MAX_FINISHED_RECORDINGS を超えた分を消す
@@ -463,32 +493,63 @@ def make_handler(agentd):
             self.wfile.write(body)
 
         def do_GET(self):
-            if self.path.split("?")[0] != "/status":
+            path = self.path.split("?")[0]
+            if path == "/status":
+                # run_id: ローカルの CLI が、接続先のノードを自分の dispatch した run が起動したものか照合するために返す。
+                # ホスト名は tailnet の任意のノードが名乗れ、tailscale のノード情報には run id が載らないため
+                self.respond(
+                    200,
+                    {
+                        "ok": True,
+                        "slots": len(agentd.udids),
+                        "verbs": sorted(verbs),
+                        "run_id": os.environ.get("GITHUB_RUN_ID", ""),
+                    },
+                )
+                return
+            if path != "/token":
                 self.respond(404, {"error": "not found"})
                 return
-            # run_id: ローカルの CLI が、接続先のノードを自分の dispatch した run が起動したものか照合するために返す。
-            # ホスト名は tailnet の任意のノードが名乗れ、tailscale のノード情報には run id が載らないため
-            self.respond(
-                200,
-                {
-                    "ok": True,
-                    "slots": len(agentd.udids),
-                    "verbs": sorted(verbs),
-                    "run_id": os.environ.get("GITHUB_RUN_ID", ""),
-                },
-            )
+            # トークンを渡してよいのは CLI 等のブラウザ以外のクライアントだけ。クロスオリジンのページは
+            # CORS に応じない限り応答を読めないが、DNS rebinding で同一オリジンになったページは読めるため、
+            # Origin に加えて Host でも弾く
+            try:
+                self.reject_origin()
+                if not is_token_host(self.headers.get("Host")):
+                    raise RequestError(403, "この Host 名ではトークンを渡さない（IP か simtunnel-<session> で接続する）")
+            except RequestError as error:
+                agentd.audit({"kind": "token", "status": error.status, "detail": error.message})
+                self.respond(error.status, {"error": error.message})
+                return
+            self.respond(200, {"token": agentd.token})
+
+        def reject_origin(self):
+            """Origin ヘッダー付き（= ブラウザが送った）要求なら RequestError(403) を送出する。
+            CLI と MCP クライアントは Origin を送らない"""
+            if "Origin" in self.headers:
+                raise RequestError(403, "Origin 付きの要求は受け付けない（ブラウザからは操作できない）")
+
+        def authorize_post(self):
+            """ブラウザからのクロスオリジン POST（CSRF）を通さないための検査。通らなければ RequestError を送出する。
+
+            Content-Type を application/json に限るのは、ブラウザが preflight なしで送れる
+            text/plain 等の本文を受けないため。トークンは Origin・Content-Type の検査をすり抜ける
+            ブラウザの不具合への多層防御"""
+            self.reject_origin()
+            if self.headers.get("Content-Type", "").split(";")[0].strip().lower() != "application/json":
+                raise RequestError(415, "Content-Type: application/json が必要")
+            if not hmac.compare_digest(self.headers.get(TOKEN_HEADER, "").encode("utf-8"), agentd.token.encode("utf-8")):
+                raise RequestError(401, f"{TOKEN_HEADER} が無いか不正（GET /token で取得する）")
 
         def do_POST(self):
             path = self.path.split("?")[0]
             verb = path[len("/v1/"):] if path.startswith("/v1/") else None
-            handler = verbs.get(verb)
-            if handler is None:
-                agentd.audit({"verb": verb, "status": 404})
-                self.respond(404, {"error": "許可されていない動詞"})
-                return
             try:
-                body = self.read_body()
-                result = handler(body)
+                self.authorize_post()
+                handler = verbs.get(verb)
+                if handler is None:
+                    raise RequestError(404, "許可されていない動詞")
+                result = handler(self.read_body())
             except RequestError as error:
                 agentd.audit({"verb": verb, "status": error.status, "detail": error.message})
                 self.respond(error.status, {"error": error.message})

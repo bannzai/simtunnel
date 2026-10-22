@@ -84,6 +84,13 @@ jobs:
 
 Apps that need a custom build (Flutter, secret restoration, SDK setup) build in their own job, upload the `.app` as an artifact, and pass it through the `app_artifact` input. See PROJECT.md for the pattern.
 
+`app_zip_url` is a plain workflow input, so GitHub does not treat it as a secret. Before passing a URL that carries credentials (a pre-signed URL, a token in the query, `user:pass@`), note that the run logs of a public repository are public:
+
+- `app_zip_url` must start with `<scheme>://`. A value without a scheme fails without being printed.
+- `install-app.sh` masks the URL with `::add-mask::` and prints only the scheme, host, and path. When the URL contains `@` anywhere, it prints only the scheme and hides curl's error text (only the exit code is printed), because unencoded `/`, `?`, or `#` in userinfo make the host boundary ambiguous. This covers the script's output, not the step's `env:` block, which the runner prints in full before the script starts.
+- Use a URL that expires within the session, or use `app_artifact`, which never puts a URL in the log.
+<!-- source: measured on run 33455363685 of this repository: the header of the "アプリを install / launch" step lists `APP_ZIP_URL:` under `env:` before the script output. -->
+
 ## Usage
 
 Run the CLI from inside the app repository (or set `SIMTUNNEL_REPO=<owner>/<repo>`).
@@ -105,15 +112,12 @@ curl -s http://simtunnel-<session>:8100/status
 curl -s http://simtunnel-<session>:8100/source/?format=json
 ```
 
-Things WebDriverAgent cannot do go through the agentd allow list:
+Things WebDriverAgent cannot do go through the agentd allow list. `simtunnel agentd` fetches the per-session token and sends it with the request:
 
 ```bash
-curl -s -X POST http://simtunnel-<session>:8200/v1/relaunch \
-  -H 'Content-Type: application/json' -d '{"slot": 0, "args": ["-UITEST", "1"]}'
-curl -s -X POST http://simtunnel-<session>:8200/v1/push \
-  -H 'Content-Type: application/json' -d '{"payload": {"aps": {"alert": "hello"}}}'
-curl -s -X POST http://simtunnel-<session>:8200/v1/status_bar \
-  -H 'Content-Type: application/json' -d '{"time": "09:41", "batteryLevel": 100}'
+simtunnel agentd <session> relaunch '{"slot": 0, "args": ["-UITEST", "1"]}'
+simtunnel agentd <session> push '{"payload": {"aps": {"alert": "hello"}}}'
+simtunnel agentd <session> status_bar '{"time": "09:41", "batteryLevel": 100}'
 ```
 
 ### MCP server
@@ -150,6 +154,7 @@ WebDriverAgent has no authentication. Reaching it means fully controlling the si
 - `tag:ci` cannot initiate connections to anything in the tailnet.
 - Ephemeral nodes. Runners leave the tailnet when the job ends.
 - agentd accepts fixed verbs with schema-validated arguments. It never runs a command string, script, or file path sent by a client.
+- agentd rejects requests a browser can send cross-origin: a POST needs `Content-Type: application/json` and the per-session `X-Simtunnel-Token` header, and a POST or `GET /token` with an `Origin` header is refused. This stops a web page opened by a tailnet member from driving agentd. It is not a substitute for keeping agentd unreachable from outside the tailnet.
 - Third-party actions are pinned to full commit SHAs. Runner scripts are checked out at the same SHA as the reusable workflow.
 
 ## Limits and GitHub's terms
