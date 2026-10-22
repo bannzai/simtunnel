@@ -10,6 +10,7 @@ trap 'rm -rf "$test_dir"' EXIT
 bin_dir="${test_dir}/bin"
 gh_log="${test_dir}/gh.log"
 session_ready="${test_dir}/session-ready"
+curl_post_log="${test_dir}/curl-post.log"
 mkdir -p "$bin_dir"
 : >"$gh_log"
 
@@ -43,7 +44,15 @@ EOF
 cat >"${bin_dir}/curl" <<'EOF'
 #!/bin/bash
 set -euo pipefail
-printf '200'
+case "$*" in
+  *:8200/token*) printf '{"token": "test-token"}' ;;
+  *:8200/v1/*)
+    # -H @- で渡されたトークンのヘッダーも記録する
+    { printf '%s\n' "$*"; cat; } >"$CURL_POST_LOG"
+    printf '{"ok": true}'
+    ;;
+  *) printf '200' ;;
+esac
 EOF
 
 chmod +x "${bin_dir}/gh" "${bin_dir}/git" "${bin_dir}/tailscale" "${bin_dir}/curl"
@@ -52,6 +61,7 @@ run_simtunnel() {
   PATH="${bin_dir}:$PATH" \
     GH_LOG="$gh_log" \
     SESSION_READY="$session_ready" \
+    CURL_POST_LOG="$curl_post_log" \
     SIMTUNNEL_REPO="example/repo" \
     "$simtunnel" "$@"
 }
@@ -114,5 +124,14 @@ rm -f "$session_ready"
 output=$(run_simtunnel up sample --ref feature --device "iPhone 17 Pro" --duration 30 --wait 2>&1)
 grep -q 'workflow run simulator-session.yml -R example/repo --ref feature -f session=sample -f device=iPhone 17 Pro -f duration_minutes=30' "$gh_log"
 grep -q 'ready: http://simtunnel-sample:8100' <<<"$output"
+
+# agentd の POST に Content-Type と GET /token で取得したトークンが付く
+run_simtunnel agentd sample relaunch '{"args": ["-UITEST"]}' >/dev/null
+grep -q -- '-X POST http://100.64.0.1:8200/v1/relaunch -H Content-Type: application/json -H @- -d {"args": \["-UITEST"\]}' "$curl_post_log"
+grep -qx 'X-Simtunnel-Token: test-token' "$curl_post_log"
+if run_simtunnel agentd sample '../status' >/dev/null 2>&1; then
+  echo "不正な動詞が受理された" >&2
+  exit 1
+fi
 
 echo "PASS: local/simtunnel の引数解析"

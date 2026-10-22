@@ -10,6 +10,7 @@
 #   simtunnel record <session> [出力パス] [--slot 1] [--duration 30] [--mp4]   # MJPEG を録画（数秒で消える通知バナー等の事後確認）
 #   simtunnel preview <session> [--slot 1]   # ブラウザで preview UI（見る + 操作）を開く
 #   simtunnel mcp-config <session> [ディレクトリ] [--name mobile] [--slot 1]   # ディレクトリ直下の .mcp.json に simtunnel MCP 設定を書き込む
+#   simtunnel agentd <session> <verb> ['<JSON 本文>']   # agentd (:8200) の動詞を呼ぶ（例: agentd dev relaunch '{"args": ["-UITEST"]}'）
 #
 # MJPEG は実質 1 クライアント占有のため、record 中は screenshot / preview と併用できない。
 # 録画からフレームを切り出す: ffmpeg -f mjpeg -i <出力.mjpeg> -fps_mode passthrough ./tmp/frame-%04d.jpg
@@ -27,7 +28,7 @@ REPO="${SIMTUNNEL_REPO:-}"
 WORKFLOW="${SIMTUNNEL_WORKFLOW:-simulator-session.yml}"
 
 usage() {
-  sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 validate_session_name() {
@@ -558,6 +559,33 @@ cmd_mcp_config() {
   echo "wrote: ${file} (server=${name}, SIMTUNNEL_WDA_URL=${wda_url})"
 }
 
+# agentd (:8200) の動詞を呼ぶ。agentd は X-Simtunnel-Token の無い POST を拒否するため、
+# 呼ぶたびに GET /token でセッションのトークンを取り直して付ける（ローカルに保存しないので、
+# 同名セッションを作り直した後に古いトークンを送ることがない）。
+# トークンは ps に出ないよう、引数ではなく標準入力から curl のヘッダーに渡す
+cmd_agentd() {
+  local session=$1; shift
+  [ $# -ge 1 ] || { echo "動詞を指定して: simtunnel agentd <session> <verb> ['<JSON 本文>']" >&2; return 1; }
+  local verb=$1 body=${2:-"{}"}
+  # URL のパスに入るため、agentd の動詞の形（relaunch / record/start 等）だけを受け付ける
+  [[ "$verb" =~ ^[a-z_]+(/[a-z_]+)?$ ]] || { echo "動詞の形式が不正: ${verb}" >&2; return 1; }
+  local ip token
+  ip=$(session_ip "$session")
+  [ -n "$ip" ] || { echo "simtunnel-${session} は tailnet に存在しない" >&2; return 1; }
+  token=$(curl -fsS -m 30 "http://${ip}:8200/token" \
+    | python3 -c 'import json, sys; print(json.load(sys.stdin)["token"])') || {
+    echo "agentd からトークンを取得できなかった（セッションの準備状態を確認）" >&2
+    return 1
+  }
+  # record/start は録画の開始まで最大 20 秒、simctl は 1 回 60 秒まで待つため、DERP 経由の遅延を含めて 120 秒
+  local status=0
+  printf 'X-Simtunnel-Token: %s\n' "$token" \
+    | curl -sS --fail-with-body -m 120 -X POST "http://${ip}:8200/v1/${verb}" \
+        -H 'Content-Type: application/json' -H @- -d "$body" || status=$?
+  echo
+  return "$status"
+}
+
 # serve-sim の preview UI をブラウザで開く。
 # preview UI は Host ヘッダから stream URL を組み立てるため、IP ではなく MagicDNS 名で開く。
 # preview UI は全 Simulator を配信しており、slot 0 は既定で表示される。--slot 1 以降は
@@ -618,7 +646,7 @@ main() {
 
   local cmd=${1:-}
   case "$cmd" in
-    up|down|status|screenshot|record|wait|preview)
+    up|down|status|screenshot|record|wait|preview|agentd)
       [ $# -ge 2 ] || {
         echo "session 名を指定して: simtunnel ${cmd} <session>" >&2
         usage >&2

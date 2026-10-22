@@ -112,15 +112,12 @@ curl -s http://simtunnel-<session>:8100/status
 curl -s http://simtunnel-<session>:8100/source/?format=json
 ```
 
-Things WebDriverAgent cannot do go through the agentd allow list:
+Things WebDriverAgent cannot do go through the agentd allow list. `simtunnel agentd` fetches the per-session token and sends it with the request:
 
 ```bash
-curl -s -X POST http://simtunnel-<session>:8200/v1/relaunch \
-  -H 'Content-Type: application/json' -d '{"slot": 0, "args": ["-UITEST", "1"]}'
-curl -s -X POST http://simtunnel-<session>:8200/v1/push \
-  -H 'Content-Type: application/json' -d '{"payload": {"aps": {"alert": "hello"}}}'
-curl -s -X POST http://simtunnel-<session>:8200/v1/status_bar \
-  -H 'Content-Type: application/json' -d '{"time": "09:41", "batteryLevel": 100}'
+simtunnel agentd <session> relaunch '{"slot": 0, "args": ["-UITEST", "1"]}'
+simtunnel agentd <session> push '{"payload": {"aps": {"alert": "hello"}}}'
+simtunnel agentd <session> status_bar '{"time": "09:41", "batteryLevel": 100}'
 ```
 
 ### MCP server
@@ -157,6 +154,7 @@ WebDriverAgent has no authentication. Reaching it means fully controlling the si
 - `tag:ci` cannot initiate connections to anything in the tailnet.
 - Ephemeral nodes. Runners leave the tailnet when the job ends.
 - agentd accepts fixed verbs with schema-validated arguments. It never runs a command string, script, or file path sent by a client.
+- agentd rejects requests a browser can send cross-origin: a POST needs `Content-Type: application/json` and the per-session `X-Simtunnel-Token` header, and a POST or `GET /token` with an `Origin` header is refused. This stops a web page opened by a tailnet member from driving agentd. It is not a substitute for keeping agentd unreachable from outside the tailnet.
 - Third-party actions are pinned to full commit SHAs. Runner scripts are checked out at the same SHA as the reusable workflow.
 
 ## Limits and GitHub's terms
