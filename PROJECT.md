@@ -77,7 +77,7 @@ Tailscale は無料の Personal プラン（デバイス 100 台）で成立す�
 workflow の入力は secret のマスキング対象外で、runner は step の `env:` を値ごと run のログに印字する（step 内の `::add-mask::` は印字済みのこの部分に効かない）。そのため資格情報を含みうる入力（`app_zip_url` の pre-signed URL 等）は、スクリプト側で `::add-mask::` した上で userinfo・query・fragment を除いた形でだけ出力し（userinfo との境界を決められない `@` 入りの値は scheme だけを出し、curl のエラー本文も捨てる）、利用者には失効の早い URL か `app_artifact` を使うよう README で案内する。
 
 1. **公開エンドポイントゼロ**: WDA / MJPEG は tailnet 内からしか到達できない
-2. **トリガーは `workflow_dispatch` のみ**: 起動できるのは write 権限者だけ。fork からの PR には Secrets / OIDC トークンの権限が渡らない
+2. **トリガーは `workflow_dispatch` のみ**: 起動できるのは write 権限者だけ。fork からの PR には Secrets / OIDC トークンの権限が渡らない。対象は Secrets / OIDC を使う session 系 workflow で、Secrets を使わず `permissions: {}` の検査 workflow（human-verification-check.yml・mcp-ci.yml）は `pull_request` で動かしてよい
 3. **長期シークレットを持たない（OIDC / workload identity federation）**: Tailscale への認証は、GitHub が workflow に発行する短命の OIDC トークンで行う。subject がこのリポジトリを指す trust credential の Subject（形式は「Tailscale セットアップ手順」参照）に一致する workflow しか認証できず、盗まれて困る静的シークレットがそもそも存在しない（Secrets の `TS_OIDC_CLIENT_ID` / `TS_OIDC_AUDIENCE` は識別子であり秘密情報ではない）
 4. **Tailscale ACL で双方向を絞る**: 自分のデバイス → `tag:ci` の 8100+i / 9100+i（WDA / MJPEG）・8200（agentd）・3200（serve-sim）のみ許可。`tag:ci` からの発信は全拒否。tailnet 内のローカルデバイスは SSH 等のサービスを listen している可能性がある前提で設計する（Tailscale が与えるのはネットワーク到達性だけでログイン権限ではないが、listen 中のサービスは攻撃面になる）。万一 runner が汚染されても tailnet 内の他デバイスへ発信できないことをこのルールで保証する
 
@@ -560,7 +560,8 @@ simtunnel/
 │   ├── simulator-session.yml         # workflow_dispatch: simtunnel 自身用の薄いラッパー（session.yml を呼ぶ）
 │   ├── macos-session.yml             # reusable workflow (workflow_call): macOS アプリセッションの実体（WDA-mac）
 │   ├── macos-app-session.yml         # workflow_dispatch: macOS 用の薄いラッパー（macos-session.yml を呼ぶ）
-│   └── macos-app-spike.yml           # workflow_dispatch: macOS アプリ対応の go/no-go スパイク（issue #23 / 検証専用）
+│   ├── macos-app-spike.yml           # workflow_dispatch: macOS アプリ対応の go/no-go スパイク（issue #23 / 検証専用）
+│   └── mcp-ci.yml                    # pull_request (mcp/** の変更時): simtunnel-mcp の npm ci + 起動 smoke test（Secrets 不要）
 ├── iOSProject/                       # iOS サンプルアプリ（SwiftUI + SwiftData / deployment target iOS 26.x）
 ├── macOSProject/                     # macOS サンプルアプリ（swiftc ビルドの最小 SwiftUI。操作結果を accessibilityIdentifier に反映）
 ├── runner/                           # GHA 側スクリプト
@@ -585,6 +586,7 @@ simtunnel/
 ├── local/
 │   └── simtunnel                     # ローカル CLI: up / down / list / status / screenshot / record / preview / wait / mcp-config / agentd
 └── mcp/                              # simtunnel-mcp（index.mjs。SIMTUNNEL_WDA_URL で接続先指定）
+    └── test/smoke.sh                 # 起動と MCP initialize 応答の smoke test（mcp-ci.yml が実行）
 ```
 
 ## MCP の登録
