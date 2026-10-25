@@ -9,7 +9,7 @@ GitHub Actions の macOS Runner 上で iOS Simulator + WebDriverAgent を起動�
 - public リポジトリで運用する（macOS Runner 無料）。tailnet 内の実 IP 等の環境固有情報は、リポジトリにも run のログ・サマリにも書かない（参照: PROJECT.md「リポジトリ公開に耐える安全性」）
 - Tailscale への認証は OIDC（workload identity federation）。GitHub Secrets は `TS_OIDC_CLIENT_ID` / `TS_OIDC_AUDIENCE`（識別子であり長期シークレットではない）
 - WDA は無認証のため、到達経路は tailnet 内に限定する。公開トンネル（cloudflared / ngrok 等）へ変更する場合は PROJECT.md「リポジトリ公開に耐える安全性」の再検討とセットで行う（参照: PROJECT.md 設計判断）
-- workflow のトリガーは `workflow_dispatch` のみとする（fork PR に Secrets を渡さないため。参照: PROJECT.md 設計判断）
+- Secrets / OIDC を使う session 系 workflow のトリガーは `workflow_dispatch` のみとする（fork PR に Secrets を渡さないため）。Secrets を使わず `permissions: {}` の検査 workflow は `pull_request` で動かしてよい（対象の一覧と理由は PROJECT.md 設計判断）
 
 ## セッション操作
 - `local/simtunnel` CLI を使う: `up <session> [--wait]` / `down <session>` / `list` / `status <session>` / `screenshot <session>` / `record <session>`（オプションはスクリプト冒頭の使い方を参照）
