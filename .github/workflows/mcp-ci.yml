@@ -1,0 +1,26 @@
+name: mcp-ci
+
+# Secrets を使わないため pull_request で動かしてよい (human-verification-check と同じ)。
+# workflow_dispatch のみにする方針は Secrets / OIDC を使う session 系 workflow が対象 (PROJECT.md「リポジトリ公開に耐える安全性」)
+on:
+  pull_request:
+    paths:
+      - "mcp/**"
+      - ".github/workflows/mcp-ci.yml"
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  mcp-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: mcp/package-lock.json
+      - run: npm ci
+        working-directory: mcp
+      - run: bash mcp/test/smoke.sh
