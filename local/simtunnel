@@ -146,7 +146,7 @@ session_node_online() {
 # 指し続けるため (PROJECT.md「repo を跨いだ同名セッション」参照)、hostname 再利用の可否はこちらで判定する
 session_node_registered() {
   local session=$1
-  "$(ts_bin)" status 2>/dev/null | awk -v h="simtunnel-${session}" '$2 == h {found=1; exit} END {exit !found}'
+  "$(ts_bin)" status 2>/dev/null | awk -v h="simtunnel-${session}" '$2 == h {found=1} END {exit !found}'
 }
 
 # ref (branch / tag) の最新コミット SHA を返す。解決できなければ空。
