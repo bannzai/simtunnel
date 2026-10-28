@@ -105,8 +105,13 @@ session_ip() {
 
 # session_ip の前提（jq と $REPO の確定）を揃える。up から cmd_wait に入った時は確定済みの $REPO を使う
 ensure_session_ip_prerequisites() {
-  command -v jq >/dev/null 2>&1 || { echo "jq が必要（brew install jq）" >&2; return 1; }
+  ensure_jq || return 1
   [ -n "$REPO" ] || ensure_repo
+}
+
+# jq が無いと jq で判定する関数 (session_ip・session_node_online) が黙って空・偽を返すため、使うコマンドの最初に確かめる
+ensure_jq() {
+  command -v jq >/dev/null 2>&1 || { echo "jq が必要（brew install jq）" >&2; return 1; }
 }
 
 # session 名に一致する実行中/待機中の run を "runID<TAB>status<TAB>headBranch<TAB>headSha" で列挙する
@@ -128,10 +133,12 @@ session_in_progress_run_ids() {
 }
 
 # simtunnel-<session> を名乗る online の node が tailnet にあるか（身元は確かめない）。
-# $REPO に run が無いのに node がある時の、repo の取り違えの案内にだけ使う。接続先は session_ip で決める
+# $REPO に run が無いのに node がある時の、repo の取り違えの案内にだけ使う。接続先は session_ip で決める。
+# 表示用の tailscale status は offline の列を "offline," と出し形式も変わり得るため、--json の .Online で判定する
 session_node_online() {
   local session=$1
-  "$(ts_bin)" status 2>/dev/null | awk -v h="simtunnel-${session}" '$2 == h && $5 != "offline" {found=1; exit} END {exit !found}'
+  "$(ts_bin)" status --json 2>/dev/null \
+    | jq -e --arg host "simtunnel-${session}" 'any(.Peer[]?; .HostName == $host and .Online == true)' >/dev/null
 }
 
 # simtunnel-<session> の node 登録が tailnet に残っているか (offline 含む)。
@@ -237,6 +244,7 @@ cmd_up() {
     esac
   done
 
+  ensure_jq || return 1
   ensure_repo || return 1
 
   # --ref が解決できないまま既存 run をキャンセルするとセッションだけが失われるため、破壊的操作の前に解決する
@@ -330,6 +338,7 @@ cmd_wait() {
 
 cmd_down() {
   local session=$1
+  ensure_jq || return 1
   ensure_repo || return 1
   local ids
   ids=$(session_runs "$session" | cut -f1)

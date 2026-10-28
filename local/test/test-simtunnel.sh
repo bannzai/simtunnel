@@ -62,7 +62,8 @@ fi
 if [ "${2:-}" = "--json" ]; then
   cat "$PEERS_FILE"
 else
-  printf '100.64.0.1 simtunnel-sample user linux active\n'
+  # 実物の tailscale status と同じく、offline のノードの 5 列目は "offline," になる
+  jq -r '.Peer[]? | [([.TailscaleIPs[] | select(test("^[0-9.]+$"))][0]), (.DNSName | split(".")[0]), "tagged-devices", "macOS", (if .Online then "active" else "offline, last seen 29m ago" end)] | join("  ")' "$PEERS_FILE"
 fi
 EOF
 
@@ -342,3 +343,53 @@ run_simtunnel mcp-config sample "$unignored_repo" >/dev/null
 [ -f "${unignored_repo}/.mcp.json" ] || { echo "ignore 済みの .mcp.json を書かなかった" >&2; exit 1; }
 
 echo "PASS: mcp-config は ignore されていない .mcp.json に書かない"
+
+# 待機の sleep の間に旧ノードの登録が tailnet から消えた状態を作る
+cat >"${bin_dir}/sleep" <<'EOF'
+#!/bin/bash
+printf '{"Peer":{}}\n' >"$PEERS_FILE"
+EOF
+chmod +x "${bin_dir}/sleep"
+
+# 期限切れのセッションの offline のノードだけが残り、対象 repo に run が無い状態
+write_offline_peer() {
+  : >"$peers_file"
+  write_peer simtunnel-sample simtunnel-sample 100.64.0.1 false '["tag:ci"]'
+  finish_peers
+}
+
+: >"$runs_file"
+write_offline_peer
+: >"$gh_log"
+output=$(run_simtunnel up sample 2>&1) || {
+  echo "offline のノードだけが残る同名セッションの up が失敗した" >&2
+  printf '%s\n' "$output" >&2
+  exit 1
+}
+if grep -q 'tailnet に存在するが' <<<"$output"; then
+  echo "offline のノードを online と判定し、repo の取り違えを案内した" >&2
+  exit 1
+fi
+grep -q '登録が tailnet から消えるのを待機中' <<<"$output"
+grep -q '^workflow run simulator-session.yml -R example/repo -f session=sample ' "$gh_log"
+
+write_offline_peer
+if run_simtunnel down sample >/dev/null 2>&1; then :; else
+  echo "offline のノードだけが残る down が冪等に成功しなかった" >&2
+  exit 1
+fi
+
+write_runner_peer
+: >"$gh_log"
+if output=$(run_simtunnel up sample 2>&1); then
+  echo "online のノードがあり run が無いのに up が成功した" >&2
+  exit 1
+fi
+grep -q 'tailnet に存在するが、example/repo に対象 run が見つからない' <<<"$output"
+if grep -q '^workflow run' "$gh_log"; then
+  echo "repo の取り違えの疑いがあるのに dispatch した" >&2
+  exit 1
+fi
+write_runs
+
+echo "PASS: session_node_online は offline のノードを online としない"
