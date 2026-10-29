@@ -22,7 +22,8 @@
 #   2. カレントディレクトリの GitHub リポジトリ（gh repo view から解決）
 # どちらでも決まらない場合はエラーにする（既定 repo へのフォールバックはしない）
 #   SIMTUNNEL_REPO=<owner>/<repo> [SIMTUNNEL_WORKFLOW=simulator-session.yml] simtunnel up <session>
-# up --wait / wait の待ち時間の上限（分）は SIMTUNNEL_WAIT_MINUTES で変える（既定 20）。
+# up --wait / wait の待ち時間の上限（分）は SIMTUNNEL_WAIT_MINUTES で変える。既定の 20 分は、環境変数を足す前の
+# 固定値（15 秒 × 80 回）を引き継いだもので、ビルド済みアプリを使う repo の WDA の準備（10 分前後）に余裕を持たせた長さ。
 # caller workflow が session job の前にアプリをビルドする repo は、ビルド時間のぶん延ばす
 set -euo pipefail
 
