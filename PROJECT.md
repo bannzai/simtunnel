@@ -287,7 +287,7 @@ jobs:
 cd <アプリ repo の作業ディレクトリ> && ~/ghq/github.com/bannzai/simtunnel/local/simtunnel up <session> --wait
 # 明示指定（どのディレクトリからでも可）
 SIMTUNNEL_REPO=<owner>/<repo> local/simtunnel up <session> --wait
-# 待ち時間の上限（分。既定 20）を延ばす
+# 待ち時間の上限（分。既定 20、1〜360）を延ばす
 SIMTUNNEL_WAIT_MINUTES=40 local/simtunnel up <session> --wait
 ```
 

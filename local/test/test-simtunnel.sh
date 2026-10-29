@@ -433,7 +433,7 @@ assert_invalid_wait_minutes_without_dispatch() {
     echo "不正な SIMTUNNEL_WAIT_MINUTES が受理された: ${value}" >&2
     return 1
   fi
-  grep -q 'SIMTUNNEL_WAIT_MINUTES は正の整数' <<<"$output"
+  grep -q 'SIMTUNNEL_WAIT_MINUTES は 1〜360 の整数' <<<"$output"
   if grep -q '^workflow run' "$gh_log"; then
     echo "不正な SIMTUNNEL_WAIT_MINUTES で dispatch した: ${value}" >&2
     return 1
@@ -444,6 +444,9 @@ assert_invalid_wait_minutes_without_dispatch 0
 assert_invalid_wait_minutes_without_dispatch 010
 assert_invalid_wait_minutes_without_dispatch abc
 assert_invalid_wait_minutes_without_dispatch -5
+# 4 倍すると bash の 64bit 整数が負に折り返し、1 回も待たずに失敗する値
+assert_invalid_wait_minutes_without_dispatch 2305843009213693952
+assert_invalid_wait_minutes_without_dispatch 361
 write_runs
 
 echo "PASS: SIMTUNNEL_WAIT_MINUTES で待機の上限を変えられる"

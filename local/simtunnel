@@ -35,10 +35,12 @@ usage() {
   sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'
 }
 
-# 待機の回数の算術式に入るため正の整数に絞る（先頭 0 は bash が 8 進数と解釈するため不可）
+# 待機の回数の算術式に入るため正の整数に絞る（先頭 0 は bash が 8 進数と解釈するため不可）。
+# 上限の 360 分は GitHub-hosted runner の job の実行時間の上限（6 時間）で、それより長く待っても session job は残らない。
+# 桁を絞ることで、4 倍した値が bash の 64bit 整数で負に折り返す入力も弾く
 validate_wait_minutes() {
-  [[ "$WAIT_MINUTES" =~ ^[1-9][0-9]*$ ]] || {
-    echo "SIMTUNNEL_WAIT_MINUTES は正の整数（先頭 0 不可）で指定して: ${WAIT_MINUTES}" >&2
+  [[ "$WAIT_MINUTES" =~ ^[1-9][0-9]{0,2}$ ]] && [ "$WAIT_MINUTES" -le 360 ] || {
+    echo "SIMTUNNEL_WAIT_MINUTES は 1〜360 の整数（先頭 0 不可）で指定して: ${WAIT_MINUTES}" >&2
     return 1
   }
 }
