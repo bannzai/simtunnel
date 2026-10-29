@@ -96,7 +96,7 @@ Apps that need a custom build (Flutter, secret restoration, SDK setup) build in 
 Run the CLI from inside the app repository (or set `SIMTUNNEL_REPO=<owner>/<repo>`).
 
 ```bash
-simtunnel up <session> --wait          # dispatch and block until WebDriverAgent answers
+simtunnel up <session> --wait          # dispatch and block until WebDriverAgent answers (up to SIMTUNNEL_WAIT_MINUTES, default 20)
 simtunnel status <session>             # GET /status
 simtunnel screenshot <session> out.jpg # one frame from the MJPEG stream (fast even over DERP relay)
 simtunnel record <session> out.mjpeg --duration 30 --mp4

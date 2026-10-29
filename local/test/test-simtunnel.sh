@@ -393,3 +393,57 @@ fi
 write_runs
 
 echo "PASS: session_node_online は offline のノードを online としない"
+
+# 待機の sleep の回数を数える（1 回 15 秒）
+sleep_log="${test_dir}/sleep.log"
+cat >"${bin_dir}/sleep" <<EOF
+#!/bin/bash
+printf '%s\n' "\$1" >>"${sleep_log}"
+EOF
+chmod +x "${bin_dir}/sleep"
+
+# 準備完了しないセッションは SIMTUNNEL_WAIT_MINUTES 分（15 秒 × 分 × 4 回）で待機を打ち切る
+printf '{"Peer":{}}\n' >"$peers_file"
+: >"$sleep_log"
+if output=$(SIMTUNNEL_WAIT_MINUTES=2 run_simtunnel wait sample 2>&1); then
+  echo "準備完了しないセッションの wait が成功した" >&2
+  exit 1
+fi
+[ "$(wc -l <"$sleep_log" | tr -d ' ')" = "8" ] || {
+  echo "SIMTUNNEL_WAIT_MINUTES=2 の待機回数が 8 回でない: $(wc -l <"$sleep_log" | tr -d ' ')" >&2
+  exit 1
+}
+grep -q '2 分以内に準備完了しなかった' <<<"$output"
+
+# 既定の上限は 20 分（80 回）
+: >"$sleep_log"
+run_simtunnel wait sample >/dev/null 2>&1 || true
+[ "$(wc -l <"$sleep_log" | tr -d ' ')" = "80" ] || {
+  echo "既定の待機回数が 80 回でない: $(wc -l <"$sleep_log" | tr -d ' ')" >&2
+  exit 1
+}
+
+# 不正な値は dispatch の前に止める
+assert_invalid_wait_minutes_without_dispatch() {
+  local value=$1
+  local output
+  : >"$gh_log"
+  : >"$runs_file"
+  if output=$(SIMTUNNEL_WAIT_MINUTES="$value" run_simtunnel up sample --wait 2>&1); then
+    echo "不正な SIMTUNNEL_WAIT_MINUTES が受理された: ${value}" >&2
+    return 1
+  fi
+  grep -q 'SIMTUNNEL_WAIT_MINUTES は正の整数' <<<"$output"
+  if grep -q '^workflow run' "$gh_log"; then
+    echo "不正な SIMTUNNEL_WAIT_MINUTES で dispatch した: ${value}" >&2
+    return 1
+  fi
+}
+
+assert_invalid_wait_minutes_without_dispatch 0
+assert_invalid_wait_minutes_without_dispatch 010
+assert_invalid_wait_minutes_without_dispatch abc
+assert_invalid_wait_minutes_without_dispatch -5
+write_runs
+
+echo "PASS: SIMTUNNEL_WAIT_MINUTES で待機の上限を変えられる"
