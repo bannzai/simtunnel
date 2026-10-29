@@ -288,7 +288,7 @@ cd <アプリ repo の作業ディレクトリ> && ~/ghq/github.com/bannzai/simt
 # 明示指定（どのディレクトリからでも可）
 SIMTUNNEL_REPO=<owner>/<repo> local/simtunnel up <session> --wait
 # 待ち時間の上限（分。既定 20、1〜360）を延ばす
-SIMTUNNEL_WAIT_MINUTES=40 local/simtunnel up <session> --wait
+SIMTUNNEL_REPO=<owner>/<repo> SIMTUNNEL_WAIT_MINUTES=40 local/simtunnel up <session> --wait
 ```
 
 `up --wait` の待ちは dispatch の直後から数えるため、caller workflow が session job の前にアプリをビルドする repo は、ビルドの時間が WDA の準備（10 分前後）に上乗せされる。上限を超えると準備完了の前に exit 1 になるので、その repo では `SIMTUNNEL_WAIT_MINUTES` を延ばす（実測: bannzai/medicalarm の run 40790545177 は build job に約 14 分かかり、`status` が通ったのは dispatch から約 23 分後で、既定の 20 分では exit 1 になった）。

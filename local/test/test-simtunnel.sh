@@ -415,9 +415,9 @@ fi
 }
 grep -q '2 分以内に準備完了しなかった' <<<"$output"
 
-# 既定の上限は 20 分（80 回）
+# 既定の上限は 20 分（80 回）。テストを実行する環境の値を継がないよう外す
 : >"$sleep_log"
-run_simtunnel wait sample >/dev/null 2>&1 || true
+(unset SIMTUNNEL_WAIT_MINUTES; run_simtunnel wait sample >/dev/null 2>&1) || true
 [ "$(wc -l <"$sleep_log" | tr -d ' ')" = "80" ] || {
   echo "既定の待機回数が 80 回でない: $(wc -l <"$sleep_log" | tr -d ' ')" >&2
   exit 1
