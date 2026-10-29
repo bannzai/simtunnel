@@ -22,13 +22,27 @@
 #   2. カレントディレクトリの GitHub リポジトリ（gh repo view から解決）
 # どちらでも決まらない場合はエラーにする（既定 repo へのフォールバックはしない）
 #   SIMTUNNEL_REPO=<owner>/<repo> [SIMTUNNEL_WORKFLOW=simulator-session.yml] simtunnel up <session>
+# up --wait / wait の待ち時間の上限（分）は SIMTUNNEL_WAIT_MINUTES で変える。既定の 20 分は、環境変数を足す前の
+# 固定値（15 秒 × 80 回）を引き継いだもので、ビルド済みアプリを使う repo の WDA の準備（10 分前後）に余裕を持たせた長さ。
+# caller workflow が session job の前にアプリをビルドする repo は、ビルド時間のぶん延ばす
 set -euo pipefail
 
 REPO="${SIMTUNNEL_REPO:-}"
 WORKFLOW="${SIMTUNNEL_WORKFLOW:-simulator-session.yml}"
+WAIT_MINUTES="${SIMTUNNEL_WAIT_MINUTES:-20}"
 
 usage() {
   sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'
+}
+
+# 待機の回数の算術式に入るため正の整数に絞る（先頭 0 は bash が 8 進数と解釈するため不可）。
+# 上限の 360 分は GitHub-hosted runner の job の実行時間の上限（6 時間）で、それより長く待っても session job は残らない。
+# 桁を絞ることで、4 倍した値が bash の 64bit 整数で負に折り返す入力も弾く
+validate_wait_minutes() {
+  [[ "$WAIT_MINUTES" =~ ^[1-9][0-9]{0,2}$ ]] && [ "$WAIT_MINUTES" -le 360 ] || {
+    echo "SIMTUNNEL_WAIT_MINUTES は 1〜360 の整数（先頭 0 不可）で指定して: ${WAIT_MINUTES}" >&2
+    return 1
+  }
 }
 
 validate_session_name() {
@@ -244,6 +258,10 @@ cmd_up() {
     esac
   done
 
+  # dispatch した後に不正な値で待機が失敗すると、起動した runner の後始末が要るため dispatch の前に検証する
+  if [ "$wait" -eq 1 ]; then
+    validate_wait_minutes || return 1
+  fi
   ensure_jq || return 1
   ensure_repo || return 1
 
@@ -318,12 +336,13 @@ cmd_up() {
   fi
 }
 
-# WDA が応答するまで待つ（最大 20 分）
+# WDA が応答するまで待つ（最大 SIMTUNNEL_WAIT_MINUTES 分）
 cmd_wait() {
   local session=$1
+  validate_wait_minutes || return 1
   ensure_session_ip_prerequisites || return 1
-  echo "simtunnel-${session} の準備完了を待機中（WDA ビルド込みで 10 分前後かかる）..."
-  for _ in $(seq 1 80); do
+  echo "simtunnel-${session} の準備完了を最大 ${WAIT_MINUTES} 分待機中（WDA ビルド込みで 10 分前後かかる）..."
+  for _ in $(seq 1 $((WAIT_MINUTES * 4))); do
     local ip
     ip=$(session_ip "$session")
     if [ -n "$ip" ] && [ "$(curl -s -m 3 -o /dev/null -w '%{http_code}' "http://${ip}:8100/status" 2>/dev/null)" = "200" ]; then
@@ -332,7 +351,7 @@ cmd_wait() {
     fi
     sleep 15
   done
-  echo "20 分以内に準備完了しなかった。run の状態: gh run list -R ${REPO} -w ${WORKFLOW}" >&2
+  echo "${WAIT_MINUTES} 分以内に準備完了しなかった（上限は SIMTUNNEL_WAIT_MINUTES で変えられる）。run の状態: gh run list -R ${REPO} -w ${WORKFLOW}" >&2
   return 1
 }
 
