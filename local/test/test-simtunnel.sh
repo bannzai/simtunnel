@@ -370,7 +370,9 @@ printf '100.64.0.9 -\n' >"$agentd_run_ids_file"
 assert_status_diagnosis "run_id を返さない" "run_id が無い"
 assert_status_diagnosis "固定する simtunnel の SHA が df6b849 より前" "固定 SHA が古いことの案内"
 assert_status_diagnosis "git ls-remote https://github.com/bannzai/simtunnel.git main" "固定 SHA の更新先の案内"
-if run_simtunnel status sample 2>&1 | grep -qF 'HostName が simtunnel-sample のノードが無い'; then
+# status はここで失敗するため、pipefail で条件が偽にならないよう出力を受けてから否定のアサーションを当てる
+output=$(run_simtunnel status sample 2>&1 || true)
+if grep -qF 'HostName が simtunnel-sample のノードが無い' <<<"$output"; then
   echo "ノードがあるのに「ノードが無い」と返した" >&2
   exit 1
 fi
@@ -387,7 +389,8 @@ run_simtunnel status sample >/dev/null 2>&1 || {
 
 printf '100.64.0.9 222\n' >"$agentd_run_ids_file"
 assert_status_diagnosis "in_progress の run と一致しない" "run_id の不一致"
-if run_simtunnel status sample 2>&1 | grep -q '固定する simtunnel の SHA'; then
+output=$(run_simtunnel status sample 2>&1 || true)
+if grep -qF '固定する simtunnel の SHA' <<<"$output"; then
   echo "run_id を返すノードに固定 SHA の案内を出した" >&2
   exit 1
 fi
