@@ -498,6 +498,7 @@ jobs:
       duration_minutes: ${{ inputs.duration_minutes }}
       build_project: MyMacApp.xcodeproj
       build_scheme: MyMacApp
+      build_extra_args: -skipPackagePluginValidation # 任意。形式は iOS の session.yml の build_extra_args と同じ
     secrets:
       TS_OIDC_CLIENT_ID: ${{ secrets.TS_OIDC_CLIENT_ID }}
       TS_OIDC_AUDIENCE: ${{ secrets.TS_OIDC_AUDIENCE }}
