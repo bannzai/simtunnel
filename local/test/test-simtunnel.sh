@@ -370,10 +370,20 @@ printf '100.64.0.9 -\n' >"$agentd_run_ids_file"
 assert_status_diagnosis "run_id を返さない" "run_id が無い"
 assert_status_diagnosis "固定する simtunnel の SHA が df6b849 より前" "固定 SHA が古いことの案内"
 assert_status_diagnosis "git ls-remote https://github.com/bannzai/simtunnel.git main" "固定 SHA の更新先の案内"
-if run_simtunnel status sample 2>&1 | grep -q 'tailnet に存在しない'; then
-  echo "ノードがあるのに「tailnet に存在しない」と返した" >&2
+if run_simtunnel status sample 2>&1 | grep -qF 'HostName が simtunnel-sample のノードが無い'; then
+  echo "ノードがあるのに「ノードが無い」と返した" >&2
   exit 1
 fi
+
+# grep のオプションに見える run_id（-e<in_progress の run id>）は照合を通さない
+printf '100.64.0.9 -e111\n' >"$agentd_run_ids_file"
+assert_status_diagnosis "in_progress の run と一致しない" "オプションに見える run_id"
+# 同じ run id を数字だけで返すノードは照合を通す
+printf '100.64.0.9 111\n' >"$agentd_run_ids_file"
+run_simtunnel status sample >/dev/null 2>&1 || {
+  echo "in_progress の run id を返すノードを照合で通さなかった" >&2
+  exit 1
+}
 
 printf '100.64.0.9 222\n' >"$agentd_run_ids_file"
 assert_status_diagnosis "in_progress の run と一致しない" "run_id の不一致"

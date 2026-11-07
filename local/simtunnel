@@ -141,7 +141,8 @@ session_ip() {
       diagnostics+="診断: ノード ${candidate_ip} の agentd が run_id を返さない。caller workflow（${REPO} の ${WORKFLOW}）が固定する simtunnel の SHA が df6b849 より前のため照合できない。uses: の SHA を bannzai/simtunnel の main（確認: git ls-remote https://github.com/bannzai/simtunnel.git main）へ上げ、そのブランチで up し直して"$'\n'
       continue
     fi
-    if grep -qxF "$agentd_run_id" <<<"$run_ids"; then
+    # run_id はノードの申告値で、grep のオプション（-e…）や改行区切りの複数パターンとして解釈させないため、数字だけに限ってから照合する
+    if [[ "$agentd_run_id" =~ ^[0-9]+$ ]] && grep -qxF -- "$agentd_run_id" <<<"$run_ids"; then
       echo "$candidate_ip"
       return 0
     fi
