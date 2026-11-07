@@ -95,26 +95,66 @@ ts_bin() {
 # （tailscale のノード情報には run id が載らない）。同名のノードが先にいると後から参加したノードの MagicDNS 名には
 # 接尾辞が付くため、名前は MagicDNS 名ではなく、ノードが申告した HostName で絞る。
 # 終了済みセッションの node が offline のまま一覧に残ることがあるため、offline の peer は対象にしない。
+# 検証できるノードが無い時は、どの条件で落ちたかを「診断:」で始まる行として標準エラーに出す（標準出力は IP を返す用途のため）。
+# ノードの申告値は端末に出さない（tailnet の他のノードが任意の文字列を返せるため）。
+# run_id の無いノードを照合なしで通さない: 照合は接続先の身元の確認で、省くと同名を名乗るノードへ接続してしまう。
 # 前提: $REPO が確定していること（ensure_repo 済み）
 session_ip() {
   local session=$1
-  local run_ids candidate_ip agentd_run_id
-  run_ids=$(session_in_progress_run_ids "$session")
-  [ -n "$run_ids" ] || return 0
-  for candidate_ip in $("$(ts_bin)" status --json 2>/dev/null | jq -r \
+  local run_ids peers candidate_online candidate_tagged candidate_ip agentd_run_id diagnostics=""
+  run_ids=$(session_in_progress_run_ids "$session") || {
+    echo "診断: ${REPO} の run の一覧を取得できない（gh run list が失敗。上の gh の出力と認証を確認）" >&2
+    return 0
+  }
+  if [ -z "$run_ids" ]; then
+    echo "診断: ${REPO} の ${WORKFLOW} に session=${session} の in_progress の run が無い（未起動・queued・終了済みのいずれか。SIMTUNNEL_REPO / SIMTUNNEL_WORKFLOW の取り違えも確認）" >&2
+    return 0
+  fi
+  peers=$("$(ts_bin)" status --json 2>/dev/null | jq -r \
     --arg host "simtunnel-${session}" \
     '.Peer[]?
      | select(.HostName == $host)
-     | select(.Online == true)
-     | select((.Tags // []) | index("tag:ci"))
-     | [.TailscaleIPs[]? | select(test("^[0-9.]+$"))][0] // empty' 2>/dev/null); do
+     | [(.Online == true), ((.Tags // []) | index("tag:ci") != null), ([.TailscaleIPs[]? | select(test("^[0-9.]+$"))][0] // empty)]
+     | @tsv' 2>/dev/null) || {
+    echo "診断: tailscale status が失敗（このマシンの Tailscale の接続を確認）" >&2
+    return 0
+  }
+  if [ -z "$peers" ]; then
+    echo "診断: HostName が simtunnel-${session} のノードが無い（runner が tailnet に参加する前か、参加に失敗。run のログを確認）" >&2
+    return 0
+  fi
+  while IFS=$'\t' read -r candidate_online candidate_tagged candidate_ip; do
+    if [ "$candidate_tagged" != "true" ]; then
+      diagnostics+="診断: ノード ${candidate_ip} に tag:ci が無い（OIDC で参加した runner ではない）"$'\n'
+      continue
+    fi
+    if [ "$candidate_online" != "true" ]; then
+      diagnostics+="診断: ノード ${candidate_ip} は offline（終了済みセッションの登録が残っている）"$'\n'
+      continue
+    fi
     # 打ち切りは cmd_status が WDA の /status に使う 10 秒にそろえる（どちらも DERP relay 経由の遅延を見込む）
-    agentd_run_id=$(curl -fsS -m 10 "http://${candidate_ip}:8200/status" 2>/dev/null | jq -r '.run_id // empty' 2>/dev/null) || continue
-    if [ -n "$agentd_run_id" ] && grep -qxF "$agentd_run_id" <<<"$run_ids"; then
+    agentd_run_id=$(curl -fsS -m 10 "http://${candidate_ip}:8200/status" 2>/dev/null | jq -r '.run_id // empty' 2>/dev/null) || {
+      diagnostics+="診断: ノード ${candidate_ip} の agentd (:8200/status) が応答しない（準備中か DERP relay の遅延。caller の固定 SHA が古いと :8200 の受け口が無いことがある: iOS は agentd の追加より前、macOS は df6b849 より前）"$'\n'
+      continue
+    }
+    if [ -z "$agentd_run_id" ]; then
+      diagnostics+="診断: ノード ${candidate_ip} の agentd が run_id を返さない。このノードを起動した caller workflow が固定する simtunnel の SHA が df6b849 より前のため照合できない。${REPO} の ${WORKFLOW} なら uses: の SHA を bannzai/simtunnel の main（確認: git ls-remote https://github.com/bannzai/simtunnel.git main）へ上げ、そのブランチで up し直して（別 repo の同名セッションのノードのこともある）"$'\n'
+      continue
+    fi
+    # run_id はノードの申告値で、grep のオプション（-e…）や改行区切りの複数パターンとして解釈させないため、数字だけに限ってから照合する
+    if [[ "$agentd_run_id" =~ ^[0-9]+$ ]] && grep -qxF -- "$agentd_run_id" <<<"$run_ids"; then
       echo "$candidate_ip"
       return 0
     fi
-  done
+    diagnostics+="診断: ノード ${candidate_ip} の agentd が返す run_id が ${REPO} の in_progress の run と一致しない（別 repo の同名セッションか、SIMTUNNEL_REPO の取り違え）"$'\n'
+  done <<<"$peers"
+  printf '%s' "$diagnostics" >&2
+}
+
+# session_ip が接続先を返さなかった時に、コマンドの失敗の理由を標準エラーに出す。原因は session_ip の診断が出している
+report_session_unverified() {
+  local session=$1
+  echo "simtunnel-${session} の接続先を確認できない（原因は上の診断。tag:ci を持ち ${REPO} の run が起動したノードだけを対象にする）" >&2
 }
 
 # session_ip の前提（jq と $REPO の確定）を揃える。up から cmd_wait に入った時は確定済みの $REPO を使う
@@ -342,15 +382,26 @@ cmd_wait() {
   validate_wait_minutes || return 1
   ensure_session_ip_prerequisites || return 1
   echo "simtunnel-${session} の準備完了を最大 ${WAIT_MINUTES} 分待機中（WDA ビルド込みで 10 分前後かかる）..."
+  # session_ip はコマンド置換の中で動くため、診断は一時ファイルで受ける。前回の試行に無かった行だけを出すので、
+  # 消えた診断が後で戻った時（A → B → A）も改めて出る
+  local diagnostics_file previous_diagnostics="" diagnostic
+  diagnostics_file=$(mktemp)
   for _ in $(seq 1 $((WAIT_MINUTES * 4))); do
     local ip
-    ip=$(session_ip "$session")
+    ip=$(session_ip "$session" 2>"$diagnostics_file")
+    while IFS= read -r diagnostic; do
+      grep -qxF -- "$diagnostic" <<<"$previous_diagnostics" && continue
+      echo "$diagnostic" >&2
+    done <"$diagnostics_file"
+    previous_diagnostics=$(cat "$diagnostics_file")
     if [ -n "$ip" ] && [ "$(curl -s -m 3 -o /dev/null -w '%{http_code}' "http://${ip}:8100/status" 2>/dev/null)" = "200" ]; then
+      rm -f "$diagnostics_file"
       echo "ready: http://${ip}:8100"
       return 0
     fi
     sleep 15
   done
+  rm -f "$diagnostics_file"
   echo "${WAIT_MINUTES} 分以内に準備完了しなかった（上限は SIMTUNNEL_WAIT_MINUTES で変えられる）。run の状態: gh run list -R ${REPO} -w ${WORKFLOW}" >&2
   return 1
 }
@@ -396,7 +447,7 @@ cmd_status() {
   local ip
   ip=$(session_ip "$session")
   if [ -z "$ip" ]; then
-    echo "simtunnel-${session} は tailnet に存在しない（未起動 or 準備中。tag:ci を持ち ${REPO} の run が起動したノードだけを対象にする）" >&2
+    report_session_unverified "$session"
     return 1
   fi
   curl -s -m 10 -w "\nHTTP %{http_code} / %{time_total}s\n" "http://${ip}:$((8100 + slot))/status"
@@ -418,7 +469,7 @@ cmd_screenshot() {
   ensure_session_ip_prerequisites || return 1
   local ip
   ip=$(session_ip "$session")
-  [ -n "$ip" ] || { echo "simtunnel-${session} は tailnet に存在しない" >&2; return 1; }
+  [ -n "$ip" ] || { report_session_unverified "$session"; return 1; }
 
   mkdir -p "$(dirname "$out")"
   local raw
@@ -484,7 +535,7 @@ cmd_record() {
   ensure_session_ip_prerequisites || return 1
   local ip
   ip=$(session_ip "$session")
-  [ -n "$ip" ] || { echo "simtunnel-${session} は tailnet に存在しない" >&2; return 1; }
+  [ -n "$ip" ] || { report_session_unverified "$session"; return 1; }
 
   mkdir -p "$(dirname "$raw")"
   echo "録画中（${duration} 秒 / slot ${slot}）... MJPEG は 1 クライアント占有のため screenshot / preview は同時に使えない"
@@ -613,7 +664,7 @@ cmd_mcp_config() {
   # MagicDNS 名はホスト名を名乗ったノードへ解決されるため、URL は session_ip で検証したノードの IP にする
   local ip
   ip=$(session_ip "$session")
-  [ -n "$ip" ] || { echo "simtunnel-${session} は tailnet に存在しない（起動後に再実行して）" >&2; return 1; }
+  [ -n "$ip" ] || { report_session_unverified "$session"; return 1; }
 
   local repo_root file existing merged script_path link
   # ~/bin/simtunnel 等の symlink 経由で起動しても実体のリポジトリを repo_root にする
@@ -656,7 +707,7 @@ cmd_agentd() {
   ensure_session_ip_prerequisites || return 1
   local ip token
   ip=$(session_ip "$session")
-  [ -n "$ip" ] || { echo "simtunnel-${session} は tailnet に存在しない" >&2; return 1; }
+  [ -n "$ip" ] || { report_session_unverified "$session"; return 1; }
   token=$(curl -fsS -m 30 "http://${ip}:8200/token" \
     | python3 -c 'import json, sys; print(json.load(sys.stdin)["token"])') || {
     echo "agentd からトークンを取得できなかった（セッションの準備状態を確認）" >&2
@@ -691,7 +742,7 @@ cmd_preview() {
   ensure_session_ip_prerequisites || return 1
   local ip node_dns_name
   ip=$(session_ip "$session")
-  [ -n "$ip" ] || { echo "simtunnel-${session} は tailnet に存在しない" >&2; return 1; }
+  [ -n "$ip" ] || { report_session_unverified "$session"; return 1; }
   node_dns_name=$("$(ts_bin)" status --json 2>/dev/null | jq -r --arg ip "$ip" \
     '[.Peer[]? | select((.TailscaleIPs // []) | index($ip)) | .DNSName // empty | rtrimstr(".")][0] // empty')
   [ -n "$node_dns_name" ] || { echo "simtunnel-${session} (${ip}) の MagicDNS 名を取得できなかった" >&2; return 1; }

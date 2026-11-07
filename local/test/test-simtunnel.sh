@@ -17,8 +17,12 @@ open_log="${test_dir}/open.log"
 runs_file="${test_dir}/runs.tsv"
 # tailscale status --json の出力
 peers_file="${test_dir}/peers.json"
-# 各ノードの agentd が /status で返す run_id（"<IPv4> <run_id>" の行。行の無い IP の agentd は応答しない）
+# 各ノードの agentd が /status で返す run_id（"<IPv4> <run_id>" の行。行の無い IP の agentd は応答しない。
+# run_id が "-" の行は、run_id を返す前の版の agentd の応答にする）
 agentd_run_ids_file="${test_dir}/agentd-run-ids"
+# このファイルがある間は gh run list / tailscale status が失敗する
+gh_failure_flag="${test_dir}/gh-fails"
+tailscale_failure_flag="${test_dir}/tailscale-fails"
 real_git=$(command -v git)
 mkdir -p "$bin_dir"
 : >"$gh_log"
@@ -29,6 +33,10 @@ set -euo pipefail
 printf '%s\n' "$*" >>"$GH_LOG"
 if [ "${1:-}" = "workflow" ] && [ "${2:-}" = "run" ]; then
   : >"$SESSION_READY"
+fi
+if [ "${1:-}" = "run" ] && [ "${2:-}" = "list" ] && [ -f "$GH_FAILURE_FLAG" ]; then
+  echo "HTTP 403: API rate limit exceeded" >&2
+  exit 1
 fi
 if [ "${1:-}" = "run" ] && [ "${2:-}" = "list" ] && [ -f "$SESSION_READY" ]; then
   case " $* " in
@@ -55,6 +63,10 @@ EOF
 cat >"${bin_dir}/tailscale" <<'EOF'
 #!/bin/bash
 set -euo pipefail
+if [ -f "$TAILSCALE_FAILURE_FLAG" ]; then
+  echo "failed to connect to local tailscaled" >&2
+  exit 1
+fi
 if [ ! -f "$SESSION_READY" ]; then
   [ "${2:-}" = "--json" ] && printf '{"Peer":{}}\n'
   exit 0
@@ -78,6 +90,10 @@ case "$url" in
     ip=${ip%%:*}
     run_id=$(awk -v ip="$ip" '$1 == ip {print $2; exit}' "$AGENTD_RUN_IDS_FILE")
     [ -n "$run_id" ] || exit 7
+    if [ "$run_id" = "-" ]; then
+      printf '{"ok": true, "slots": 1, "verbs": []}\n'
+      exit 0
+    fi
     printf '{"ok": true, "run_id": "%s"}\n' "$run_id"
     exit 0
     ;;
@@ -105,6 +121,8 @@ run_simtunnel() {
   PATH="${bin_dir}:$PATH" \
     REAL_GIT="$real_git" \
     GH_LOG="$gh_log" \
+    GH_FAILURE_FLAG="$gh_failure_flag" \
+    TAILSCALE_FAILURE_FLAG="$tailscale_failure_flag" \
     CURL_LOG="$curl_log" \
     SESSION_READY="$session_ready" \
     RUNS_FILE="$runs_file" \
@@ -290,6 +308,110 @@ write_runs
 
 echo "PASS: session_ip の接続先検証"
 
+# status が失敗し、標準エラーに expected の文言を出し、標準出力に何も出さないことを確かめる
+assert_status_diagnosis() {
+  local expected=$1 description=$2 stdout_file stderr_file
+  stdout_file="${test_dir}/status.stdout"
+  stderr_file="${test_dir}/status.stderr"
+  if run_simtunnel status sample >"$stdout_file" 2>"$stderr_file"; then
+    echo "${description}: status が成功した" >&2
+    return 1
+  fi
+  grep -qF -- "$expected" "$stderr_file" || {
+    echo "${description}: 診断に「${expected}」が無い" >&2
+    cat "$stderr_file" >&2
+    return 1
+  }
+  [ ! -s "$stdout_file" ] || {
+    echo "${description}: 標準出力に診断が混ざった" >&2
+    cat "$stdout_file" >&2
+    return 1
+  }
+}
+
+: >"$runs_file"
+write_runner_peer
+assert_status_diagnosis "in_progress の run が無い" "in_progress の run が無い"
+write_runs
+
+: >"$gh_failure_flag"
+assert_status_diagnosis "gh run list が失敗" "gh の失敗"
+assert_status_diagnosis "HTTP 403" "gh の失敗の内容"
+rm -f "$gh_failure_flag"
+
+: >"$tailscale_failure_flag"
+assert_status_diagnosis "tailscale status が失敗" "tailscale の失敗"
+rm -f "$tailscale_failure_flag"
+
+: >"$peers_file"
+write_peer simtunnel-other simtunnel-other 100.64.0.9 true '["tag:ci"]'
+finish_peers
+assert_status_diagnosis "HostName が simtunnel-sample のノードが無い" "HostName が一致するノードが無い"
+
+: >"$peers_file"
+write_peer simtunnel-sample simtunnel-sample 100.64.0.9 true '["tag:other"]'
+finish_peers
+printf '100.64.0.9 111\n' >"$agentd_run_ids_file"
+assert_status_diagnosis "tag:ci が無い" "tag"
+
+: >"$peers_file"
+write_peer simtunnel-sample simtunnel-sample 100.64.0.9 false '["tag:ci"]'
+finish_peers
+assert_status_diagnosis "offline" "online"
+
+: >"$peers_file"
+write_peer simtunnel-sample simtunnel-sample 100.64.0.9 true '["tag:ci"]'
+finish_peers
+: >"$agentd_run_ids_file"
+assert_status_diagnosis "agentd (:8200/status) が応答しない" "agentd の無応答"
+
+# run_id を返す前の版の agentd は、固定 SHA が古い caller が起動したノード
+printf '100.64.0.9 -\n' >"$agentd_run_ids_file"
+assert_status_diagnosis "run_id を返さない" "run_id が無い"
+assert_status_diagnosis "固定する simtunnel の SHA が df6b849 より前" "固定 SHA が古いことの案内"
+assert_status_diagnosis "git ls-remote https://github.com/bannzai/simtunnel.git main" "固定 SHA の更新先の案内"
+# status はここで失敗するため、pipefail で条件が偽にならないよう出力を受けてから否定のアサーションを当てる
+output=$(run_simtunnel status sample 2>&1 || true)
+if grep -qF 'HostName が simtunnel-sample のノードが無い' <<<"$output"; then
+  echo "ノードがあるのに「ノードが無い」と返した" >&2
+  exit 1
+fi
+
+# grep のオプションに見える run_id（-e<in_progress の run id>）は照合を通さない
+printf '100.64.0.9 -e111\n' >"$agentd_run_ids_file"
+assert_status_diagnosis "in_progress の run と一致しない" "オプションに見える run_id"
+# 同じ run id を数字だけで返すノードは照合を通す
+printf '100.64.0.9 111\n' >"$agentd_run_ids_file"
+run_simtunnel status sample >/dev/null 2>&1 || {
+  echo "in_progress の run id を返すノードを照合で通さなかった" >&2
+  exit 1
+}
+
+printf '100.64.0.9 222\n' >"$agentd_run_ids_file"
+assert_status_diagnosis "in_progress の run と一致しない" "run_id の不一致"
+output=$(run_simtunnel status sample 2>&1 || true)
+if grep -qF '固定する simtunnel の SHA' <<<"$output"; then
+  echo "run_id を返すノードに固定 SHA の案内を出した" >&2
+  exit 1
+fi
+
+# 接続先が見つかった時は、同名の別ノードの診断を出さない
+: >"$peers_file"
+write_peer simtunnel-sample simtunnel-sample 100.64.0.9 true '["tag:ci"]'
+write_peer simtunnel-sample simtunnel-sample-1 100.64.0.1 true '["tag:ci"]'
+finish_peers
+printf '100.64.0.9 222\n100.64.0.1 111\n' >"$agentd_run_ids_file"
+output=$(run_simtunnel status sample 2>&1) || {
+  echo "接続先が見つかるのに status が失敗した" >&2
+  exit 1
+}
+if grep -qF '診断:' <<<"$output"; then
+  echo "接続先が見つかったのに診断を出した" >&2
+  exit 1
+fi
+
+echo "PASS: session_ip は接続先を確認できない原因を標準エラーに出す"
+
 # preview は検証したノード自身の MagicDNS 名で開く（先着の別ノードに解決される simtunnel-sample ではなく -1 の方）
 : >"$peers_file"
 write_peer simtunnel-sample simtunnel-sample 100.64.0.9 true '["tag:ci"]'
@@ -450,3 +572,60 @@ assert_invalid_wait_minutes_without_dispatch 361
 write_runs
 
 echo "PASS: SIMTUNNEL_WAIT_MINUTES で待機の上限を変えられる"
+
+# wait は繰り返しの中で同じ診断を 1 回だけ出す（上限 1 分 = 4 回試す）
+: >"$peers_file"
+write_peer simtunnel-sample simtunnel-sample 100.64.0.9 true '["tag:ci"]'
+finish_peers
+printf '100.64.0.9 -\n' >"$agentd_run_ids_file"
+if output=$(SIMTUNNEL_WAIT_MINUTES=1 run_simtunnel wait sample 2>&1); then
+  echo "run_id を返さないノードしか無いのに wait が成功した" >&2
+  exit 1
+fi
+[ "$(grep -c 'run_id を返さない' <<<"$output")" = "1" ] || {
+  echo "同じ診断を繰り返し出した" >&2
+  printf '%s\n' "$output" >&2
+  exit 1
+}
+
+# 待機の途中で変わった診断は改めて出す。1 回目は run_id の無い応答、以降は agentd の無応答
+cat >"${bin_dir}/sleep" <<EOF
+#!/bin/bash
+: >"${agentd_run_ids_file}"
+EOF
+printf '100.64.0.9 -\n' >"$agentd_run_ids_file"
+if output=$(SIMTUNNEL_WAIT_MINUTES=1 run_simtunnel wait sample 2>&1); then
+  echo "接続先を確認できないのに wait が成功した" >&2
+  exit 1
+fi
+[ "$(grep -c 'run_id を返さない' <<<"$output")" = "1" ] && [ "$(grep -c 'agentd (:8200/status) が応答しない' <<<"$output")" = "1" ] || {
+  echo "変わった診断が 1 回ずつ出ていない" >&2
+  printf '%s\n' "$output" >&2
+  exit 1
+}
+
+# 消えた診断が戻った時は改めて出す。試行ごとに run_id の無い応答 → agentd の無応答 → run_id の無い応答 → 同じ
+sleep_count_file="${test_dir}/sleep-count"
+printf '0\n' >"$sleep_count_file"
+cat >"${bin_dir}/sleep" <<EOF
+#!/bin/bash
+count=\$((\$(cat "${sleep_count_file}") + 1))
+printf '%s\n' "\$count" >"${sleep_count_file}"
+if [ "\$count" = "1" ]; then
+  : >"${agentd_run_ids_file}"
+else
+  printf '100.64.0.9 -\n' >"${agentd_run_ids_file}"
+fi
+EOF
+printf '100.64.0.9 -\n' >"$agentd_run_ids_file"
+if output=$(SIMTUNNEL_WAIT_MINUTES=1 run_simtunnel wait sample 2>&1); then
+  echo "接続先を確認できないのに wait が成功した" >&2
+  exit 1
+fi
+[ "$(grep -c 'run_id を返さない' <<<"$output")" = "2" ] && [ "$(grep -c 'agentd (:8200/status) が応答しない' <<<"$output")" = "1" ] || {
+  echo "戻った診断を改めて出していない" >&2
+  printf '%s\n' "$output" >&2
+  exit 1
+}
+
+echo "PASS: wait は同じ診断を繰り返さない"
