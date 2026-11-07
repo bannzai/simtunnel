@@ -52,9 +52,8 @@ if [[ "${BUILD_EXTRA_ARGS:-}" =~ [^[:space:]] ]]; then
   # glob 展開を無効にし、"*" 等が caller repo 内のファイル名へ置き換わることを防ぐ。
   set -f
   # shellcheck disable=SC2206
-  EXTRA_ARGS=($BUILD_EXTRA_ARGS)
+  BUILD_ARGS+=($BUILD_EXTRA_ARGS)
   set +f
-  BUILD_ARGS+=("${EXTRA_ARGS[@]}")
 fi
 
 xcodebuild "${BUILD_ARGS[@]}" build >"${WORK}/macos-app-build.log" 2>&1 || {

@@ -53,6 +53,7 @@ EOF
 
 chmod +x "${BIN_DIR}/xcodebuild"
 
+# 引数の VAR=value を環境変数に足して build-macos-app.sh を実行する。前回の xcodebuild の記録と GITHUB_ENV は消す
 run_build() {
   rm -f "${LOG_DIR}/xcodebuild-args-build" "${LOG_DIR}/xcodebuild-args-settings" "${LOG_DIR}/github-env"
   (
