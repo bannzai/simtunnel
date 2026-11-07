@@ -42,6 +42,11 @@ on:
         type: string
         required: false
         default: Debug
+      build_extra_args:
+        description: "build_project の xcodebuild に追加で渡す引数（空白区切り。各引数に空白は含められない）"
+        type: string
+        required: false
+        default: ""
     secrets:
       TS_OIDC_CLIENT_ID:
         required: true
@@ -132,6 +137,7 @@ jobs:
           BUILD_PROJECT: ${{ inputs.build_project }}
           BUILD_SCHEME: ${{ inputs.build_scheme }}
           BUILD_CONFIGURATION: ${{ inputs.build_configuration }}
+          BUILD_EXTRA_ARGS: ${{ inputs.build_extra_args }}
         run: ./simtunnel/runner/build-macos-app.sh
 
       - name: アプリを LaunchServices に登録して起動
