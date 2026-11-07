@@ -138,7 +138,7 @@ session_ip() {
       continue
     }
     if [ -z "$agentd_run_id" ]; then
-      diagnostics+="診断: ノード ${candidate_ip} の agentd が run_id を返さない。caller workflow（${REPO} の ${WORKFLOW}）が固定する simtunnel の SHA が df6b849 より前のため照合できない。uses: の SHA を bannzai/simtunnel の main（確認: git ls-remote https://github.com/bannzai/simtunnel.git main）へ上げ、そのブランチで up し直して"$'\n'
+      diagnostics+="診断: ノード ${candidate_ip} の agentd が run_id を返さない。このノードを起動した caller workflow が固定する simtunnel の SHA が df6b849 より前のため照合できない。${REPO} の ${WORKFLOW} なら uses: の SHA を bannzai/simtunnel の main（確認: git ls-remote https://github.com/bannzai/simtunnel.git main）へ上げ、そのブランチで up し直して（別 repo の同名セッションのノードのこともある）"$'\n'
       continue
     fi
     # run_id はノードの申告値で、grep のオプション（-e…）や改行区切りの複数パターンとして解釈させないため、数字だけに限ってから照合する
@@ -382,17 +382,18 @@ cmd_wait() {
   validate_wait_minutes || return 1
   ensure_session_ip_prerequisites || return 1
   echo "simtunnel-${session} の準備完了を最大 ${WAIT_MINUTES} 分待機中（WDA ビルド込みで 10 分前後かかる）..."
-  # session_ip はコマンド置換の中で動くため、診断は一時ファイルで受けて、まだ出していない行だけを出す
-  local diagnostics_file shown_diagnostics="" diagnostic
+  # session_ip はコマンド置換の中で動くため、診断は一時ファイルで受ける。前回の試行に無かった行だけを出すので、
+  # 消えた診断が後で戻った時（A → B → A）も改めて出る
+  local diagnostics_file previous_diagnostics="" diagnostic
   diagnostics_file=$(mktemp)
   for _ in $(seq 1 $((WAIT_MINUTES * 4))); do
     local ip
     ip=$(session_ip "$session" 2>"$diagnostics_file")
     while IFS= read -r diagnostic; do
-      grep -qxF -- "$diagnostic" <<<"$shown_diagnostics" && continue
+      grep -qxF -- "$diagnostic" <<<"$previous_diagnostics" && continue
       echo "$diagnostic" >&2
-      shown_diagnostics+="${diagnostic}"$'\n'
     done <"$diagnostics_file"
+    previous_diagnostics=$(cat "$diagnostics_file")
     if [ -n "$ip" ] && [ "$(curl -s -m 3 -o /dev/null -w '%{http_code}' "http://${ip}:8100/status" 2>/dev/null)" = "200" ]; then
       rm -f "$diagnostics_file"
       echo "ready: http://${ip}:8100"

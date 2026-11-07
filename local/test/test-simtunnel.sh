@@ -401,7 +401,11 @@ write_peer simtunnel-sample simtunnel-sample 100.64.0.9 true '["tag:ci"]'
 write_peer simtunnel-sample simtunnel-sample-1 100.64.0.1 true '["tag:ci"]'
 finish_peers
 printf '100.64.0.9 222\n100.64.0.1 111\n' >"$agentd_run_ids_file"
-if run_simtunnel status sample 2>&1 | grep -q '診断:'; then
+output=$(run_simtunnel status sample 2>&1) || {
+  echo "接続先が見つかるのに status が失敗した" >&2
+  exit 1
+}
+if grep -qF '診断:' <<<"$output"; then
   echo "接続先が見つかったのに診断を出した" >&2
   exit 1
 fi
@@ -596,6 +600,30 @@ if output=$(SIMTUNNEL_WAIT_MINUTES=1 run_simtunnel wait sample 2>&1); then
 fi
 [ "$(grep -c 'run_id を返さない' <<<"$output")" = "1" ] && [ "$(grep -c 'agentd (:8200/status) が応答しない' <<<"$output")" = "1" ] || {
   echo "変わった診断が 1 回ずつ出ていない" >&2
+  printf '%s\n' "$output" >&2
+  exit 1
+}
+
+# 消えた診断が戻った時は改めて出す。試行ごとに run_id の無い応答 → agentd の無応答 → run_id の無い応答 → 同じ
+sleep_count_file="${test_dir}/sleep-count"
+printf '0\n' >"$sleep_count_file"
+cat >"${bin_dir}/sleep" <<EOF
+#!/bin/bash
+count=\$((\$(cat "${sleep_count_file}") + 1))
+printf '%s\n' "\$count" >"${sleep_count_file}"
+if [ "\$count" = "1" ]; then
+  : >"${agentd_run_ids_file}"
+else
+  printf '100.64.0.9 -\n' >"${agentd_run_ids_file}"
+fi
+EOF
+printf '100.64.0.9 -\n' >"$agentd_run_ids_file"
+if output=$(SIMTUNNEL_WAIT_MINUTES=1 run_simtunnel wait sample 2>&1); then
+  echo "接続先を確認できないのに wait が成功した" >&2
+  exit 1
+fi
+[ "$(grep -c 'run_id を返さない' <<<"$output")" = "2" ] && [ "$(grep -c 'agentd (:8200/status) が応答しない' <<<"$output")" = "1" ] || {
+  echo "戻った診断を改めて出していない" >&2
   printf '%s\n' "$output" >&2
   exit 1
 }
