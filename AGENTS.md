@@ -5,6 +5,11 @@ GitHub Actions の macOS Runner 上で iOS Simulator + WebDriverAgent を起動�
 ## ドキュメント
 - 設計・採用理由・実装フェーズの SSOT は PROJECT.md。設計に関わる変更をしたら同じ変更で PROJECT.md も更新する
 
+## リポジトリのメモ
+作業の前に索引 `documents/notes/README.md` を読み、読むべき場面に当たるメモの本文を読む。
+
+@documents/notes/README.md
+
 ## 前提
 - public リポジトリで運用する（macOS Runner 無料）。tailnet 内の実 IP 等の環境固有情報は、リポジトリにも run のログ・サマリにも書かない（参照: PROJECT.md「リポジトリ公開に耐える安全性」）
 - Tailscale への認証は OIDC（workload identity federation）。GitHub Secrets は `TS_OIDC_CLIENT_ID` / `TS_OIDC_AUDIENCE`（識別子であり長期シークレットではない）
