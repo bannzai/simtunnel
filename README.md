@@ -82,6 +82,14 @@ jobs:
       TS_OIDC_AUDIENCE: ${{ secrets.TS_OIDC_AUDIENCE }}
 ```
 
+The session job runs on `macos-26` by default. An app that needs a newer Xcode (for example a deployment target of iOS 27) picks the runner label with the `runner` input:
+
+```yaml
+    with:
+      session: ${{ inputs.session }}
+      runner: xcode-27
+```
+
 Apps that need a custom build (Flutter, secret restoration, SDK setup) build in their own job, upload the `.app` as an artifact, and pass it through the `app_artifact` input. See PROJECT.md for the pattern.
 
 `app_zip_url` is a plain workflow input, so GitHub does not treat it as a secret. Before passing a URL that carries credentials (a pre-signed URL, a token in the query, `user:pass@`), note that the run logs of a public repository are public:
