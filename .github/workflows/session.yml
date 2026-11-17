@@ -10,6 +10,13 @@ on:
         description: "セッション名。tailnet ホスト名 simtunnel-<session> になる（小文字英数字とハイフンのみ）"
         type: string
         required: true
+      # 既定はサンプルアプリ (iOSProject) の deployment target（iOS 26.x）をビルドできる macos-26。
+      # より新しい Xcode が要るアプリは caller がラベルを指定する（参照: PROJECT.md「各アプリ repo での実行」）
+      runner:
+        description: "実行する macOS runner ラベル（macos-26 / xcode-27）"
+        type: string
+        required: false
+        default: macos-26
       device:
         description: "Simulator のデバイス名"
         type: string
@@ -82,8 +89,7 @@ env:
 
 jobs:
   session:
-    # サンプルアプリ (iOSProject) の deployment target が iOS 26.x のため macos-26 (Xcode 26.5)
-    runs-on: macos-26
+    runs-on: ${{ inputs.runner }}
     # 各 step が個別に時間制限を持つため、これは暴走時の最終防衛線
     timeout-minutes: 360
     # caller が付与した権限を必要最小限まで絞る（Tailscale の OIDC 認証に id-token: write が必要）

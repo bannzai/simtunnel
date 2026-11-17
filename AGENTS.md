@@ -23,7 +23,7 @@ GitHub Actions の macOS Runner 上で iOS Simulator + WebDriverAgent を起動�
 
 ## サンプルアプリ
 - `iOSProject/`（SwiftUI + SwiftData）。セッション起動時に runner 上でビルドされ launch まで行われる。無効化は `gh workflow run` で `-f sample_app=false`
-- deployment target が iOS 26.x のため runner は macos-26 固定。デバイスは iPhone 17 系を使う
+- deployment target が iOS 26.x のため runner の既定は macos-26（`session.yml` の `runner` input で変えられる）。デバイスは iPhone 17 系を使う
 
 ## 検証
 - セッション疎通: `local/simtunnel status <session>` が HTTP 200 を返すこと

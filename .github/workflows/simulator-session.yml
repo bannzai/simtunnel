@@ -18,6 +18,10 @@ on:
         description: "Simulator のデバイス名"
         required: true
         default: iPhone 17
+      runner:
+        description: "実行する macOS runner ラベル（macos-26 / xcode-27）"
+        required: false
+        default: macos-26
       duration_minutes:
         description: "セッション維持時間（分）"
         required: true
@@ -65,6 +69,7 @@ jobs:
     with:
       session: ${{ inputs.session }}
       device: ${{ inputs.device }}
+      runner: ${{ inputs.runner }}
       duration_minutes: ${{ inputs.duration_minutes }}
       simulators: ${{ inputs.simulators }}
       app_zip_url: ${{ inputs.app_zip_url }}

@@ -237,6 +237,7 @@ GitHub の Additional Product Terms は、GitHub-hosted runner の用途を「wo
 - Actions cache は repo 単位のため、アプリ repo ごとに初回 run は WDA ビルドが走る（2 回目以降はキャッシュヒット）
 - ビルド対象は input（`build_project` / `build_scheme` / `build_configuration`）で渡す。`build_project` は caller repo ルート相対の .xcodeproj / .xcworkspace パス。bundle id はビルド成果物から自動取得する
 - 標準の xcodebuild に追加の引数が必要な場合は、空白区切りの `build_extra_args` で渡す（例: Swift Package の build tool plugin に必要な `-skipPackagePluginValidation`）。各引数に空白は含められない。SDK セットアップやビルド前処理など自由な step が必要な場合だけ、後述の build job + artifact 経路を使う
+- session job の runner は `runner` input のラベルで決まる（既定 `macos-26`）。`macos-26` の image に無い Xcode が要るアプリ（例: deployment target が iOS 27）は、caller の `with:` に `runner: xcode-27` を書く（`local/simtunnel` の `up` は runner を送らないため、アプリ repo では caller に固定のラベルを書く）
 
 caller workflow の例（アプリ repo の `.github/workflows/simulator-session.yml`）:
 
